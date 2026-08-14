@@ -1,0 +1,188 @@
+# =============================================================
+# C23 PROJECT MAKEFILE (GoogleTest Edition)
+# ============================================================
+
+# --- Compilers ---
+CC  := gcc
+CXX := g++
+# --- Directories ---
+SRC_DIR   := src
+TEST_DIR  := tests
+PROTO_DIR := proto            # <-- NEW: Katalog z plikami .proto
+GEN_DIR   := src/generated    # <-- NEW: Gdzie mają trafiać wygenerowane pliki
+
+# --- Output Names ---
+TEST_BIN := run_tests
+# --- Mode: debug or release (dbg, rel) ---
+MODE ?= dbg
+# --- Target Type Selection (app, static, shared) ---
+TYPE ?= app
+
+ifeq ($(MODE), rel)
+    CFLAGS_MODE := -O3 -DNDEBUG
+    CXXFLAGS_MODE := -O3 -DNDEBUG
+    OBJ_DIR := obj/release
+    # BIN_NAME := my_project
+else
+    CFLAGS_MODE := -g -Og -DDEBUG
+    CXXFLAGS_MODE := -g -Og -DDEBUG
+    OBJ_DIR := obj/debug
+    # BIN_NAME := my_project_debug
+endif
+
+
+# --- OS Detection ---
+ifeq ($(OS),Windows_NT)
+    PLATFORM_OS := WINDOWS
+    RAYLIB_PATH    := C:/Users/SSzczawinski/scoop/apps/mingw/15.2.0-rt_v13-rev0/mingw64
+    RAYLIB_CFLAGS  := -I$(RAYLIB_PATH)/include
+    RAYLIB_LIBS    := -L$(RAYLIB_PATH)/lib -lraylib -lopengl32 -lgdi32 -lwinmm
+    BIN_EXT := .exe
+else
+    PLATFORM_OS := LINUX
+    RAYLIB_PATH    := /usr
+    RAYLIB_CFLAGS  := -I$(RAYLIB_PATH)/include
+    RAYLIB_LIBS    := -L$(RAYLIB_PATH)/lib -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
+    BIN_EXT :=
+endif
+
+
+# --- Output Names & Flags based on Type ---
+ifeq ($(TYPE), static)
+    # Biblioteka statyczna
+	# Dla statycznej też warto dodać -fPIC, jeśli ktoś potem wrzuci ją do *.so
+    TARGET_CFLAGS := -fPIC
+    TARGET_CXXFLAGS := -fPIC
+    ifeq ($(MODE), rel)
+        BIN_NAME := libmy_project.a
+    else
+        BIN_NAME := libmy_project_debug.a
+    endif
+else ifeq ($(TYPE), shared)
+    # Biblioteka dynamiczna
+    TARGET_CFLAGS := -fPIC
+    TARGET_CXXFLAGS := -fPIC
+    ifeq ($(PLATFORM_OS), WINDOWS)
+        ifeq ($(MODE), rel)
+            BIN_NAME := my_project.dll
+        else
+            BIN_NAME := my_project_debug.dll
+        endif
+    else
+        ifeq ($(MODE), rel)
+            BIN_NAME := libmy_project.so
+        else
+            BIN_NAME := libmy_project_debug.so
+        endif
+    endif
+else
+    # Domyślnie: Aplikacja wykonywalna
+    TARGET_CFLAGS :=
+    TARGET_CXXFLAGS :=
+    ifeq ($(MODE), rel)
+        BIN_NAME := my_project$(BIN_EXT)
+    else
+        BIN_NAME := my_project_debug$(BIN_EXT)
+    endif
+endif
+
+# --- Libraries ---
+ZMQ_CFLAGS := $(shell pkg-config --cflags libzmq)
+ZMQ_LIBS   := $(shell pkg-config --libs libzmq)
+PROTO_LIBS := -lprotobuf-c    # <-- NEW: Linkowanie biblioteki protobuf-c
+GTEST_LIBS := -lgtest -lgtest_main -lpthread
+LIBS       := $(ZMQ_LIBS) $(RAYLIB_LIBS) $(PROTO_LIBS) -lstdc++
+
+# --- Global Flags ---
+CFLAGS   := -std=c23 -Wall -Wextra -Isrc -MMD -MP $(ZMQ_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS_MODE) $(TARGET_CFLAGS)
+CXXFLAGS := -std=c++23 -Wall -Wextra -Isrc -MMD -MP $(ZMQ_CFLAGS) $(RAYLIB_CFLAGS) $(CXXFLAGS_MODE)  $(TARGET_CXXFLAGS)
+LDFLAGS  := $(LIBS)
+
+# --- File Discovery ---
+
+# Discover Proto Files and Targets
+PROTOS := $(shell find $(PROTO_DIR) -name "*.proto")                          # <-- NEW
+PROTO_SRCS := $(PROTOS:$(PROTO_DIR)/%.proto=$(GEN_DIR)/%.pb-c.c)              # <-- NEW
+PROTO_HDRS := $(PROTOS:$(PROTO_DIR)/%.proto=$(GEN_DIR)/%.pb-c.h)              # <-- NEW
+
+# Main Application Sources
+SRCS := $(shell find $(SRC_DIR) -name "*.c")
+OBJS := $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+
+# <--- CHANGED: Test Sources now look for .cpp files (GoogleTest standard)
+TEST_SRCS := $(shell find $(TEST_DIR) -name "*.cpp")
+TEST_OBJS := $(TEST_SRCS:$(TEST_DIR)/%.cpp=$(OBJ_DIR)/tests/%.o)
+
+# Dependencies
+DEPS := $(OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+
+# =============================================================
+# GOALS
+# =============================================================
+
+.PHONY: all clean run test full proto
+
+all: proto $(BIN_NAME)
+
+run: proto $(BIN_NAME)
+	@echo "Running Application..."
+	@./$(BIN_NAME) $(ARGS)
+	
+test: proto $(TEST_BIN)
+	@echo "--- Running GoogleTests ---"
+	@./$(TEST_BIN)
+
+# <-- NEW: Goal do ręcznego wymuszenia generowania proto
+proto: $(PROTO_SRCS)
+#==================================================================
+# Linking Rules
+#==================================================================
+
+# Link Application OR Create Library
+$(BIN_NAME): $(OBJS)
+ifeq ($(TYPE), static)
+	@echo "Creating Static Library: $@"
+	@ar rcs $@ $(OBJS)
+else ifeq ($(TYPE), shared)
+	@echo "Linking Shared Library: $@"
+	@$(CC) -shared $(OBJS) -o $@ $(LDFLAGS)
+else
+	@echo "Linking Application: $@"
+	@$(CC) $(OBJS) -o $@ $(LDFLAGS)
+endif
+
+# Link Tests
+$(TEST_BIN): $(filter-out $(OBJ_DIR)/main.o, $(OBJS)) $(TEST_OBJS)
+	@echo "Linking Tests: $@"
+	@$(CXX) $^ -o $@ $(LDFLAGS) $(GTEST_LIBS)
+
+#==================================================================
+# Compilation Rules
+#==================================================================
+
+# Compile Source Files
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	@echo "Compiling: $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile Test Files
+$(OBJ_DIR)/tests/%.o: $(TEST_DIR)/%.cpp
+	@mkdir -p $(dir $@)
+	@echo "Compiling Test: $<"
+	@$(CXX) $(CXXFLAGS) -c $< -o $@
+
+clean:
+	@echo "Cleaning up..."
+	@echo "Cleaning up obj..."
+	@rm -rf obj 
+	@echo "Cleaning up generated files..."
+	@rm -rf $(GEN_DIR) 
+	@echo "Cleaning up app binary..."
+	@rm -rf $(BIN_NAME) 
+	@echo "Cleaning up test binary..."
+	@rm -rf $(TEST_BIN)
+	
+full: clean all
+
+-include $(DEPS)
