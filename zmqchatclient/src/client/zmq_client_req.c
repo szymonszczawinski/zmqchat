@@ -13,17 +13,18 @@
 // Helper wysyłający i odbierający na REQ
 static Api__Chat__MessageEnvelope* send_and_recv_env(void* requester, Api__Chat__MessageEnvelope* envelope);
 
-static void handle_rooms_request(void* requester);
+static void handle_rooms_request(void* requester, void* command_socket);
 
-static void handle_room_join_request(void* requester, void* ctrl_pub, char* line, char* username);
+static void handle_room_join_request(void* requester, void* ctrl_pub, void* command_socket, char* line, char* username);
 
-static void handle_room_leave_request(void* requester, void* ctrl_pub, char* line, char* username);
+static void handle_room_leave_request(
+    void* requester, void* ctrl_pub, void* command_socket, char* line, char* username);
 
-static void handle_message_room_request(void* requester, char* line, char* username);
+static void handle_message_room_request(void* requester, void* command_socket, char* line, char* username);
 
-static void handle_message_direct_request(void* requester, char* line, char* username);
+static void handle_message_direct_request(void* requester, void* command_socket, char* line, char* username);
 
-static void clean_up(void* requester, void* ctrl_pub, RequesterArgs* args);
+static void clean_up(void* command_socket, void* requester, void* ctrl_pub, RequesterArgs* args);
 
 void* requester_routine(void* arg)
 {
@@ -33,26 +34,39 @@ void* requester_routine(void* arg)
     pfd.fd     = STDIN_FILENO;
     pfd.events = POLLIN;
 
-    RequesterArgs*         args      = (RequesterArgs*)arg;
-    void*                  context   = args->context;
-    char*                  username  = args->username;
-    volatile sig_atomic_t* running   = args->running;
-    void*                  requester = zmq_socket(context, ZMQ_REQ);
+    RequesterArgs*         args     = (RequesterArgs*)arg;
+    void*                  context  = args->context;
+    char*                  username = args->username;
+    volatile sig_atomic_t* running  = args->running;
+
+    // 1. Gniazdo SIECIOWE (REQ)
+    void* requester = zmq_socket(context, ZMQ_REQ);
     if (zmq_connect(requester, REQ_ADDRESS) != 0)
     {
-        perror("REQ connection error");
-        clean_up(requester, NULL, args);
+        perror("[REQ Thread] REQ connection error");
+        clean_up(NULL, requester, NULL, args);
         return NULL;
     }
 
+    // 2. Gniazdo STERUJĄCE (PAIR do wątku SUB)
     void* ctrl_pub = zmq_socket(context, ZMQ_PAIR);
     if (zmq_bind(ctrl_pub, SUB_CONTROLL_ADDRESS) != 0)
     {
-        perror("bind inproc://sub-control error");
-        clean_up(requester, ctrl_pub, args);
-
+        perror("[REQ Thread] bind inproc://sub-control error");
+        clean_up(NULL, requester, ctrl_pub, args);
         return NULL;
     }
+
+    // 3. Gniazdo KOMEND (PAIR z wątkiem UI)
+    void* command_socket = zmq_socket(context, ZMQ_PAIR);
+    if (zmq_bind(command_socket, COMMAND_SOCKET_ADDRESS) != 0)
+    {
+        perror("[REQ Thread] bind inproc://command-socket error");
+        clean_up(NULL, requester, ctrl_pub, args);
+        return NULL;
+    }
+
+    // 4. Logowanie automatyczne przy starcie
     Api__Chat__LoginRequest login_req = API__CHAT__LOGIN_REQUEST__INIT;
     login_req.username                = username;
     login_req.client_version          = "1.0.0";
@@ -66,94 +80,61 @@ void* requester_routine(void* arg)
     if (!resp || resp->payload_case != API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LOGIN_RESP
         || resp->login_resp->status != API__CHAT__STATUS__STATUS_OK)
     {
-        printf("login failed!\n");
-        clean_up(requester, ctrl_pub, args);
+        printf("[REQ Thread] login failed!\n");
+        clean_up(command_socket, requester, ctrl_pub, args);
         return NULL;
     }
     api__chat__message_envelope__free_unpacked(resp, NULL);
-    printf("login success as '%s'!\n", username);
+    printf("[REQ Thread] login success as '%s'!\n", username);
 
-    char line[512];
-    fgets(line, sizeof(line), stdin);  // czyszczenie bufora po scanf
-
-    printf("> -1\n");
-    printf("> ");
+    // 5. Pętla obsługi poleceń z wątku UI
     while (running && *running)
     {
-        fflush(stdout);
-
-        // Czekamy 100 ms na wpisanie czegokolwiek w konsoli
-        int poll_res = poll(&pfd, 1, 100);
-
-        if (poll_res < 0)
+        char cmd_buf[512];
+        int  bytes = zmq_recv(command_socket, cmd_buf, sizeof(cmd_buf) - 1, 0);
+        if (bytes <= 0)
         {
-            // Przerwanie sygnałem (EINTR) - wychodzimy
             break;
         }
-        if (poll_res == 0)
-        {
-            // Timeout (brak danych) - wracamy do początku pętli i sprawdzamy *running!
-            continue;
-        }
+        cmd_buf[bytes] = '\0';
 
-        if (!fgets(line, sizeof(line), stdin))
+        if (strcmp(cmd_buf, "/quit") == 0)
         {
-            printf("> 0\n");
-            // Jeśli fgets przerwał z powodu Ctrl+C (EINTR) lub flagi running
-            if (!*running)
-            {
-                printf("> 1\n");
-                break;
-            }
-            // Zwykły błąd lub EOF (np. Ctrl+D)
             break;
         }
 
-        printf("> 2\n");
-        line[strcspn(line, "\r\n")] = 0;
-        if (strlen(line) == 0)
+        if (strcmp(cmd_buf, "/rooms") == 0)
         {
-            continue;
+            handle_rooms_request(requester, command_socket);
         }
-
-        if (strcmp(line, "/quit") == 0)
+        else if (strncmp(cmd_buf, "/join ", 6) == 0)
         {
-            *running = false;
-            break;
+            handle_room_join_request(requester, ctrl_pub, command_socket, cmd_buf, username);
         }
-
-        // --- /rooms ---
-        if (strcmp(line, "/rooms") == 0)
+        else if (strncmp(cmd_buf, "/leave ", 7) == 0)
         {
-            handle_rooms_request(requester);
+            handle_room_leave_request(requester, ctrl_pub, command_socket, cmd_buf, username);
         }
-        else if (strncmp(line, "/join ", 6) == 0)
+        else if (strncmp(cmd_buf, "/msg ", 5) == 0)
         {
-            handle_room_join_request(requester, ctrl_pub, line, username);
+            handle_message_room_request(requester, command_socket, cmd_buf, username);
         }
-        else if (strncmp(line, "/leave ", 7) == 0)
+        else if (strncmp(cmd_buf, "/dm ", 4) == 0)
         {
-            handle_room_leave_request(requester, ctrl_pub, line, username);
-
-            // --- /msg <room> <content> ---
+            handle_message_direct_request(requester, command_socket, cmd_buf, username);
         }
-        else if (strncmp(line, "/msg ", 5) == 0)
+        else
         {
-            handle_message_room_request(requester, line, username);
-
-            // --- /dm <target> <content> ---
-        }
-        else if (strncmp(line, "/dm ", 4) == 0)
-        {
-            handle_message_direct_request(requester, line, username);
+            zmq_send(command_socket, "Nieznana komenda.", 17, 0);
         }
     }
-    clean_up(requester, ctrl_pub, args);
+
+    clean_up(command_socket, requester, ctrl_pub, args);
     printf("[ZMQClient][REQ Thread] exit\n");
     return NULL;
 }
 
-static void handle_rooms_request(void* requester)
+static void handle_rooms_request(void* requester, void* command_socket)
 {
     Api__Chat__ListRoomsRequest list_req = API__CHAT__LIST_ROOMS_REQUEST__INIT;
     Api__Chat__MessageEnvelope  req_env  = API__CHAT__MESSAGE_ENVELOPE__INIT;
@@ -162,24 +143,32 @@ static void handle_rooms_request(void* requester)
     req_env.list_rooms_req               = &list_req;
 
     Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+
+    char out_buf[1024] = "Nie udało się pobrać listy pokojów.";
     if (res_env && res_env->payload_case == API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LIST_ROOMS_RESP)
     {
-        printf("--- Lista Pokojów (%size_t) ---\n", res_env->list_rooms_resp->n_rooms);
+        int offset = snprintf(
+            out_buf, sizeof(out_buf), "--- Lista Pokojów (%size_t) ---\n", res_env->list_rooms_resp->n_rooms);
         for (size_t i = 0; i < res_env->list_rooms_resp->n_rooms; i++)
         {
             Api__Chat__RoomInfo* r = res_env->list_rooms_resp->rooms[i];
-            printf(" * Pokój: #%-10s | Członków: %d\n", r->name, r->member_count);
+            offset += snprintf(out_buf + offset,
+                               sizeof(out_buf) - offset,
+                               " * Pokój: #%-10s | Członków: %d\n",
+                               r->name,
+                               r->member_count);
         }
     }
+
+    zmq_send(command_socket, out_buf, strlen(out_buf), 0);
+
     if (res_env)
     {
         api__chat__message_envelope__free_unpacked(res_env, NULL);
     }
-
-    // --- /join <room> ---
 }
 
-static void handle_room_join_request(void* requester, void* ctrl_pub, char* line, char* username)
+static void handle_room_join_request(void* requester, void* ctrl_pub, void* command_socket, char* line, char* username)
 {
     char* room_name = line + 6;
 
@@ -193,20 +182,24 @@ static void handle_room_join_request(void* requester, void* ctrl_pub, char* line
     req_env.join_room_req              = &join_req;
 
     Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+
+    char out_buf[256] = "Błąd dołączania do pokoju.";
     if (res_env && res_env->payload_case == API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ACK)
     {
-        printf("[SERWER]: %s\n", res_env->ack->message);
+        snprintf(out_buf, sizeof(out_buf), "[SERWER]: %s", res_env->ack->message);
 
-        // BEZPIECZNE: Wysyłamy komendę do wątku SUB po szynie inproc!
+        // Wysyłamy komendę do wątku SUB po szynie inproc
         char ctrl_cmd[128];
         snprintf(ctrl_cmd, sizeof(ctrl_cmd), "+room:%s", room_name);
         zmq_send(ctrl_pub, ctrl_cmd, strlen(ctrl_cmd), 0);
     }
+
+    zmq_send(command_socket, out_buf, strlen(out_buf), 0);
+
     if (res_env)
     {
         api__chat__message_envelope__free_unpacked(res_env, NULL);
     }
-    // --- /leave <room> ---
 }
 
 static Api__Chat__MessageEnvelope* send_and_recv_env(void* requester, Api__Chat__MessageEnvelope* envelope)
@@ -226,7 +219,7 @@ static Api__Chat__MessageEnvelope* send_and_recv_env(void* requester, Api__Chat_
     return api__chat__message_envelope__unpack(NULL, received_bytes_number, received_buffer);
 }
 
-static void handle_room_leave_request(void* requester, void* ctrl_pub, char* line, char* username)
+static void handle_room_leave_request(void* requester, void* ctrl_pub, void* command_socket, char* line, char* username)
 {
     char* room_name = line + 7;
 
@@ -240,20 +233,26 @@ static void handle_room_leave_request(void* requester, void* ctrl_pub, char* lin
     req_env.leave_room_req             = &leave_req;
 
     Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+
+    char out_buf[256] = "Błąd opuszczania pokoju.";
     if (res_env && res_env->payload_case == API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ACK)
     {
-        printf("[SERWER]: %s\n", res_env->ack->message);
+        snprintf(out_buf, sizeof(out_buf), "[SERWER]: %s", res_env->ack->message);
 
-        // BEZPIECZNE: Wysyłamy komendę odsubskrybowania po szynie inproc!
         char ctrl_cmd[128];
         snprintf(ctrl_cmd, sizeof(ctrl_cmd), "-room:%s", room_name);
         zmq_send(ctrl_pub, ctrl_cmd, strlen(ctrl_cmd), 0);
     }
+
+    zmq_send(command_socket, out_buf, strlen(out_buf), 0);
+
     if (res_env)
+    {
         api__chat__message_envelope__free_unpacked(res_env, NULL);
+    }
 }
 
-static void handle_message_room_request(void* requester, char* line, char* username)
+static void handle_message_room_request(void* requester, void* command_socket, char* line, char* username)
 {
     char* room_name = strtok(line + 5, " ");
     char* content   = strtok(NULL, "");
@@ -272,15 +271,22 @@ static void handle_message_room_request(void* requester, char* line, char* usern
 
         Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
         if (res_env)
+        {
+            zmq_send(command_socket, "[ACK] Wiadomość wysłana", 22, 0);
             api__chat__message_envelope__free_unpacked(res_env, NULL);
+        }
+        else
+        {
+            zmq_send(command_socket, "[ERR] Błąd wysyłania wiadomości", 31, 0);
+        }
     }
     else
     {
-        printf("Użycie: /msg <nazwa_pokoju> <treść>\n");
+        zmq_send(command_socket, "Użycie: /msg <nazwa_pokoju> <treść>", 35, 0);
     }
 }
 
-static void handle_message_direct_request(void* requester, char* line, char* username)
+static void handle_message_direct_request(void* requester, void* command_socket, char* line, char* username)
 {
     char* target  = strtok(line + 4, " ");
     char* content = strtok(NULL, "");
@@ -299,16 +305,27 @@ static void handle_message_direct_request(void* requester, char* line, char* use
 
         Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
         if (res_env)
+        {
+            zmq_send(command_socket, "[ACK] Wiadomość prywatna wysłana", 32, 0);
             api__chat__message_envelope__free_unpacked(res_env, NULL);
+        }
+        else
+        {
+            zmq_send(command_socket, "[ERR] Błąd wysyłania DM", 23, 0);
+        }
     }
     else
     {
-        printf("Użycie: /dm <użytkownik> <treść>\n");
+        zmq_send(command_socket, "Użycie: /dm <użytkownik> <treść>", 32, 0);
     }
 }
 
-static void clean_up(void* requester, void* ctrl_pub, RequesterArgs* args)
+static void clean_up(void* command_socket, void* requester, void* ctrl_pub, RequesterArgs* args)
 {
+    if (command_socket)
+    {
+        zmq_close(command_socket);
+    }
     if (requester)
     {
         zmq_close(requester);

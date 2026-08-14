@@ -9,33 +9,46 @@
 #include <pthread.h>
 #include <zmq.h>
 
-static void handle_pub_sub_message(void* subscriber);
+static void handle_pub_sub_message(void* subscriber, void* ui_pub);
 static void handle_command(void* ctrl_sub, void* subscriber);
 
 void* subscriber_routine(void* arg)
 {
     printf("[ZMQClient][SUB Thread] start subscriber_routine\n");
-    SubscriberArgs* args    = (SubscriberArgs*)arg;
-    void*           context = args->context;
+    SubscriberArgs*        args    = (SubscriberArgs*)arg;
+    void*                  context = args->context;
+    volatile sig_atomic_t* running = args->running;
 
-    volatile sig_atomic_t* running    = args->running;
-    void*                  subscriber = zmq_socket(context, ZMQ_SUB);
+    // 1. Gniazdo SIECIOWE (ZMQ_SUB)
+    void* subscriber = zmq_socket(context, ZMQ_SUB);
     if (zmq_connect(subscriber, SUB_ADDRESS) != 0)
     {
         perror("[ZMQClient][SUB Thread] Błąd połączenia z PUB");
         free(args);
         return NULL;
-    }  // 1. general room sub
+    }
 
+    // 2. Gniazdo STERUJĄCE z wątku REQ (ZMQ_PAIR)
     void* ctrl_sub = zmq_socket(context, ZMQ_PAIR);
     if (zmq_connect(ctrl_sub, SUB_CONTROLL_ADDRESS) != 0)
     {
-        perror("[SUB Thread] Błąd połączenia z  SUB_CONTROLL_ADDRESS");
+        perror("[SUB Thread] Błąd połączenia z SUB_CONTROLL_ADDRESS");
         zmq_close(subscriber);
         free(args);
         return NULL;
     }
 
+    // 3. Gniazdo NOTYFIKACJI do wątku UI (ZMQ_PAIR lub ZMQ_PUSH)
+    void* ui_pub = zmq_socket(context, ZMQ_PAIR);
+    if (zmq_connect(ui_pub, UI_NOTIF_ADDRESS) != 0)
+    {
+        perror("[SUB Thread] Błąd połączenia z UI_NOTIF_ADDRESS");
+        zmq_close(subscriber);
+        zmq_close(ctrl_sub);
+        free(args);
+        return NULL;
+    }
+    // Subskrypcje początkowe
     char user_topic[128], room_general[128];
     snprintf(user_topic, sizeof(user_topic), "user:%s", args->username);
     snprintf(room_general, sizeof(room_general), "room:general");
@@ -45,23 +58,21 @@ void* subscriber_routine(void* arg)
 
     zmq_pollitem_t items[] = {
         { subscriber, 0, ZMQ_POLLIN, 0 },  // 0: Wiadomości sieciowe (PUB/SUB)
-        { ctrl_sub, 0, ZMQ_POLLIN, 0 }     // 1: Komendy sterujące z głównego wątku (inproc)
+        { ctrl_sub, 0, ZMQ_POLLIN, 0 }     // 1: Komendy sterujące z REQ (inproc)
     };
-
     while (running && *running)
     {
-        // Czekamy na zdarzenia na dowolnym z 2 gniazd
-        int rc = zmq_poll(items, 2, -1);
+        int rc = zmq_poll(items, 2, 100);
         if (rc < 0)
         {
             break;
         }
-        // --- OBSŁUGA ZDARZEŃ SIECIOWYCH (PUB/SUB) ---
+
         if (items[0].revents & ZMQ_POLLIN)
         {
-            handle_pub_sub_message(subscriber);
+            handle_pub_sub_message(subscriber, ui_pub);
         }
-        // --- OBSŁUGA KOMEND Z GŁÓWNEGO WĄTKU (INPROC) ---
+
         if (items[1].revents & ZMQ_POLLIN)
         {
             handle_command(ctrl_sub, subscriber);
@@ -69,61 +80,69 @@ void* subscriber_routine(void* arg)
     }
     zmq_close(subscriber);
     zmq_close(ctrl_sub);
+    zmq_close(ui_pub);
     free(args);
     printf("[ZMQClient][SUB Thread] exit\n");
     return NULL;
 }
 
-static void handle_pub_sub_message(void* subscriber)
+static void handle_pub_sub_message(void* subscriber, void* ui_pub)
 {
-    printf("[ZMQClient][SUB Thread] handle_pub_sub_message\n");
     char topic_buffer[256];
     int  topic_len = zmq_recv(subscriber, topic_buffer, sizeof(topic_buffer) - 1, 0);
-    if (topic_len > 0)
-    {
-        topic_buffer[topic_len] = '\0';
+    if (topic_len <= 0)
+        return;
 
-        uint8_t data_buffer[2048];
-        int     data_len = zmq_recv(subscriber, data_buffer, sizeof(data_buffer), 0);
-        if (data_len > 0)
-        {
-            Api__Chat__MessageEnvelope* message_envelope
-                = api__chat__message_envelope__unpack(NULL, data_len, data_buffer);
-            if (message_envelope != NULL)
-            {
-                switch (message_envelope->payload_case)
-                {
-                case API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ROOM_MSG:
-                {
-                    Api__Chat__RoomMessage* room_message = message_envelope->room_msg;
-                    printf("\n[ROOM #%s] %s: %s\n> ",
-                           room_message->room_name,
-                           room_message->sender_username,
-                           room_message->content);
-                    fflush(stdout);
-                    break;
-                }
-                case API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_DIRECT_MSG:
-                {
-                    Api__Chat__DirectMessage* direct_message = message_envelope->direct_msg;
-                    printf("\n[DM from %s]: %s\n> ", direct_message->sender_username, direct_message->content);
-                    fflush(stdout);
-                    break;
-                }
-                case API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_SYSTEM_NOTIF:
-                {
-                    Api__Chat__SystemNotification* notification_message = message_envelope->system_notif;
-                    printf("\n[SYSTEM #%s]: %s\n> ", notification_message->room_name, notification_message->message);
-                    fflush(stdout);
-                    break;
-                }
-                default:
-                    break;
-                }
-                api__chat__message_envelope__free_unpacked(message_envelope, NULL);
-            }
-        }
+    topic_buffer[topic_len] = '\0';
+
+    uint8_t data_buffer[2048];
+    int     data_len = zmq_recv(subscriber, data_buffer, sizeof(data_buffer), 0);
+    if (data_len <= 0)
+        return;
+
+    Api__Chat__MessageEnvelope* envelope = api__chat__message_envelope__unpack(NULL, data_len, data_buffer);
+    if (!envelope)
+        return;
+
+    char formatted_msg[1024];
+    formatted_msg[0] = '\0';
+
+    switch (envelope->payload_case)
+    {
+    case API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ROOM_MSG:
+    {
+        Api__Chat__RoomMessage* msg = envelope->room_msg;
+        snprintf(formatted_msg,
+                 sizeof(formatted_msg),
+                 "[ROOM #%s] %s: %s",
+                 msg->room_name,
+                 msg->sender_username,
+                 msg->content);
+        break;
     }
+    case API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_DIRECT_MSG:
+    {
+        Api__Chat__DirectMessage* dm = envelope->direct_msg;
+        snprintf(formatted_msg, sizeof(formatted_msg), "[DM from %s]: %s", dm->sender_username, dm->content);
+        break;
+    }
+    case API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_SYSTEM_NOTIF:
+    {
+        Api__Chat__SystemNotification* sys = envelope->system_notif;
+        snprintf(formatted_msg, sizeof(formatted_msg), "[SYSTEM #%s]: %s", sys->room_name, sys->message);
+        break;
+    }
+    default:
+        break;
+    }
+
+    // Wysyłamy sformatowaną wiadomość tekstową do wątku UI
+    if (strlen(formatted_msg) > 0)
+    {
+        zmq_send(ui_pub, formatted_msg, strlen(formatted_msg), 0);
+    }
+
+    api__chat__message_envelope__free_unpacked(envelope, NULL);
 }
 
 static void handle_command(void* ctrl_sub, void* subscriber)

@@ -1,6 +1,7 @@
 #include "zmq_client.h"
 #include "zmq_client_req.h"
 #include "zmq_client_sub.h"
+#include "zmq_client_ui.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,14 +26,6 @@ int zmq_client_run(void)
     if (scanf("%63s", username) != 1)
         return 1;
 
-    printf("\nDostępne komendy:\n");
-    printf("  /rooms                     - wyświetla listę pokojów na serwerze\n");
-    printf("  /join <nazwa_pokoju>       - dołącza do pokoju\n");
-    printf("  /leave <nazwa_pokoju>      - opuszcza pokój\n");
-    printf("  /msg <nazwa_pokoju> <treść>- wysyła wiadomość do pokoju\n");
-    printf("  /dm <użytkownik> <treść>   - wysyła wiadomość prywatną\n");
-    printf("  /quit                      - wyjście z programu\n\n");
-
     void* context = zmq_ctx_new();
 
     pthread_t       sub_thread;
@@ -49,6 +42,13 @@ int zmq_client_run(void)
     strncpy(req_args->username, username, sizeof(req_args->username));
     pthread_create(&req_thread, NULL, requester_routine, req_args);
 
+    pthread_t ui_thread;
+    UiArgs*   ui_args = malloc(sizeof(UiArgs));
+    ui_args->context  = context;
+    ui_args->running  = &running;
+    strncpy(ui_args->username, username, sizeof(ui_args->username));
+    pthread_create(&ui_thread, NULL, ui_routine, req_args);
+
     // Czekamy na sygnał (pętla sprawdzająca stan flagi running)
     while (running)
     {
@@ -62,6 +62,7 @@ int zmq_client_run(void)
     printf("[ZMQClient] context closed...\n");
     pthread_join(sub_thread, NULL);
     pthread_join(req_thread, NULL);
+    pthread_join(ui_thread, NULL);
 
     return EXIT_SUCCESS;
 }
