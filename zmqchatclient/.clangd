@@ -1,0 +1,55 @@
+If:
+  PathMatch: [.*\.c]
+Index:
+  Background: Build
+CompileFlags:
+  Compiler: gcc
+  # Remove: [-std=*] # Removes the c2x from compile_commands to avoid conflict
+  Add:
+    - -Iunity
+    - -Isrc
+    - -Itests
+    - -DLOCAL
+    - -Wall
+    - -O2
+    - -Wextra
+    - -Wshadow
+    - -Wconversion
+    - -Wfloat-equal
+    - -Wno-unused-const-variable
+    - -Wno-sign-conversion
+    - -std=c23
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+  ClangTidy:
+    # Add: [bugprone-*, performance-*, readability-*]
+    Add: [bugprone-*, performance-*]
+---
+If:
+  PathMatch: [.*\.cpp, .*\.hpp]
+Index:
+  Background: Build
+CompileFlags:
+  Compiler: g++
+  # Remove: [-std=*] # Removes the c2x from compile_commands to avoid conflict
+  Add:
+    - -Iunity
+    - -Isrc
+    - -Itests
+    - -DLOCAL
+    - -Wall
+    - -O2
+    - -Wextra
+    - -Wshadow
+    - -Wconversion
+    - -Wfloat-equal
+    - -Wno-unused-const-variable
+    - -Wno-sign-conversion
+    - -std=c++23
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+  ClangTidy:
+    # Add: [bugprone-*, performance-*, readability-*]
+    Add: [bugprone-*, performance-*]

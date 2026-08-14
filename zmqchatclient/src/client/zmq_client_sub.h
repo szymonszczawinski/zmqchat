@@ -1,0 +1,14 @@
+#ifndef ZQM_CLIENT_SUB_H
+#define ZQM_CLIENT_SUB_H
+
+#include <signal.h>
+
+typedef struct
+{
+    void*                  context;
+    char                   username[64];
+    volatile sig_atomic_t* running;
+} SubscriberArgs;
+
+void* subscriber_routine(void* arg);
+#endif  // !ZQM_CLIENT_SUB_H

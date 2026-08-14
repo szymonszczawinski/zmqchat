@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package api.chat;
+
+option go_package = "api.chat/v1;chat";
+
+// --- ENUMY (STATUSY I TYPY NOTYFIKACJI) ---
+
+enum Status {
+  STATUS_UNKNOWN = 0;
+  STATUS_OK = 1;
+  STATUS_ERROR = 2;
+  STATUS_UNAUTHORIZED = 3;
+}
+
+enum NotificationType {
+  NOTIF_UNKNOWN = 0;
+  NOTIF_USER_JOINED = 1;
+  NOTIF_USER_LEFT = 2;
+  NOTIF_SYSTEM_ALERT = 3;
+}
+
+// --- LOGOWANIE ---
+message LoginRequest {
+  string username = 1;
+  string client_version = 2;
+}
+
+message LoginResponse {
+  Status status = 1;
+  string session_token = 2;
+  string error_message = 3;
+}
+
+// --- ZARZĄDZANIE POKOJAMI ---
+message JoinRoomRequest {
+  string room_name = 1;
+  string username = 2;
+}
+
+message LeaveRoomRequest {
+  string room_name = 1;
+  string username = 2;
+}
+
+message ListRoomsRequest {}
+
+message RoomInfo {
+  string name = 1;
+  int32 member_count = 2;
+  repeated string members = 3;
+}
+
+message ListRoomsResponse {
+  Status status = 1;
+  repeated RoomInfo rooms = 2;
+}
+// --- WIADOMOŚCI I UNIWERSALNY ACK ---
+message RoomMessage {
+  string room_name = 1;
+  string sender_username = 2;
+  string content = 3;
+  int64 timestamp = 4;
+}
+
+message DirectMessage {
+  string recipient_username = 1;
+  string sender_username = 2;
+  string content = 3;
+  int64 timestamp = 4;
+}
+
+message SystemNotification {
+  NotificationType type = 1;
+  string room_name = 2;
+  string message = 3;
+  int64 timestamp = 4;
+}
+
+message GenericAck {
+  Status status = 1;
+  string message = 2;
+}
+
+// --- KOPERTA GŁÓWNA ---
+message MessageEnvelope {
+  string message_id = 1;
+
+  oneof payload {
+    LoginRequest login_req = 2;
+    LoginResponse login_resp = 3;
+
+    JoinRoomRequest join_room_req = 4;
+    LeaveRoomRequest leave_room_req = 5;
+    ListRoomsRequest list_rooms_req = 6;
+    ListRoomsResponse list_rooms_resp = 7;
+
+    RoomMessage room_msg = 8;
+    DirectMessage direct_msg = 9;
+    SystemNotification system_notif = 10;
+    GenericAck ack = 11;
+  }
+}

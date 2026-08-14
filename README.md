@@ -1,93 +1,102 @@
-# zmqchat
+# Faza 1: Baza danych i Kontrakt (Protobuf)
 
+Cel: Stworzenie wspólnego języka, którym będą się porozumiewać Go i C.
 
+## Krok 1.1: Konfiguracja środowiska i narzędzi
 
-## Getting started
+Zainstalowanie protoc (kompilatora Protobuf).
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Instalacja wtyczki dla Go (protoc-gen-go) oraz dla C (protobuf-c).
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+Instalacja bibliotek ZeroMQ (libzmq dla C oraz pebbe/zmq4 dla Go).
 
-## Add your files
+## Krok 1.2: Projekt pliku chat.proto
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+Zdefiniowanie uniwersalnej „koperty” (ChatMessage Envelope), która pozwoli rozróżnić typ przesłanej wiadomości.
 
-```
-cd existing_repo
-git remote add origin https://gitlab.com/szymonszczawinski/zmqchat.git
-git branch -M main
-git push -uf origin main
-```
+Stworzenie struktur dla podstawowych akcji: LoginRequest/LoginResponse, RoomMessage oraz SystemNotification.
 
-## Integrate with your tools
+## Krok 1.3: Generowanie kodu
 
-* [Set up project integrations](https://gitlab.com/szymonszczawinski/zmqchat/-/settings/integrations)
+Kompilacja pliku .proto do plików źródłowych C (.pb-c.h, .pb-c.c) oraz Go (.pb.go).
 
-## Collaborate with your team
+Napisanie krótkiego testu jednostkowego w obu językach (serializacja prostej struktury w C -> zapis do pliku -> odczyt i deserializacja w Go).
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+# Faza 2: Pierwszy strzał (Synchroniczne REQ / REP)
 
-## Test and Deploy
+Cel: Nawiązanie podstawowej komunikacji klient (C) -> serwer (Go) i obsługa logowania.
 
-Use the built-in continuous integration in GitLab.
+## Krok 2.1: Prosty serwer REQ/REP w Go
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Utworzenie gniazda ZMQ_REP na wybranym porcie (np. tcp://*:5555).
 
-***
+Pętla odbierająca bajty, deserializująca je przez Protobuf, wypisująca tekst w konsoli i odsyłająca odpowiedź statusową.
 
-# Editing this README
+## Krok 2.2: Prosty klient REQ/REP w C
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Utworzenie gniazda ZMQ_REQ połączonego z serwerem.
 
-## Suggestions for a good README
+Zbudowanie struktury LoginRequest w C, zserializowanie jej do bufora, wysłanie przez ZMQ i odebranie odpowiedzi.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Krok 2.3: Obsługa logiki sesji po stronie Go
 
-## Name
-Choose a self-explaining name for your project.
+Dodanie do serwera prostej pamięci w podręcznej (mapa map[string]User) do przechowywania zalogowanych użytkowników i ich statusu.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+# Faza 3: Kanał wiadomości na żywo (Asynchroniczne PUB / SUB)
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Cel: Budowa mechanizmu pokojów i rozgłaszania wiadomości w czasie rzeczywistym.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+## Krok 3.1: Dodanie szyny PUB po stronie serwera Go
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+Otwarcie drugiego gniazda ZMQ – ZMQ_PUB (np. na porcie tcp://*:5556).
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Utworzenie wewnętrznego kanału (go channel) do przekazywania wiadomości z gniazda odbierającego (REQ/DEALER) do gniazda rozgłaszającego (PUB).
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## Krok 3.2: Odbiornik SUB po stronie klienta C
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
++-----------------------------------------------------------------+
+|                         KLIENT W C                              |
+|                                                                 |
+|  +------------------------+        +--------------------------+ |
+|  |     Główny Wątek       |        |   Wątek Tła (pthread)    | |
+|  |   (Pętla CLI / REQ)    |        |        (ZMQ_SUB)         | |
+|  +------------------------+        +--------------------------+ |
+|              |                                   |              |
++--------------|-----------------------------------|--------------+
+               | (tcp://localhost:5555)            | (tcp://localhost:5556)
+               v                                   v
+    [Gniazdo REP w Go]                  [Gniazdo PUB w Go]
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+Dodanie drugiego wątku lub użycie zmq_poll w C, aby klient mógł równolegle nasłuchiwać na gnieździe ZMQ_SUB.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+Przetestowanie filtrowania tematów (np. subskrypcja prefiksu "room:general").
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## Krok 3.3: Przesyłanie i rozgłaszanie wiadomości z pokoju
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+Klient C wysyła wiadomość do pokoju.
 
-## License
-For open source projects, say how it is licensed.
+Serwer Go odbiera ją, dokleja nagłówek tematu (np. room:general [dane_protobuf]) i publikuje przez ZMQ_PUB.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Klient C odbiera ramkę, odcina prefiks tematu, deserializuje Protobuf i wyświetla na ekranie.
+
+# Faza 4: Doprofilowanie i Architektura Wyrównana (ZMQ Router/Dealer)
+
+Cel: Zamiana sztywnej architektury REQ/REP na skalowalny model asynchroniczny i ulepszenie interfejsu.
+
+## Krok 4.1: Przejście z REQ/REP na ROUTER/DEALER
+
+Zastąpienie ZMQ_REP na serwerze przez ZMQ_ROUTER (aby serwer mógł obsługiwać wielu klientów bez blokowania się).
+
+Zastąpienie ZMQ_REQ na kliencie przez ZMQ_DEALER (asynchroniczne wysyłanie bez konieczności natychmiastowego czekania na odpowiedź).
+
+## Krok 4.2: Pokoje dynamiczne i listy użytkowników
+
+Obsługa komend klienta dołączania/opuszczania pokojów (ZMQ_SUBSCRIBE / ZMQ_UNSUBSCRIBE).
+
+Rozgłaszanie powiadomień systemowych (np. „Użytkownik X dołączył do pokoju”).
+
+## Krok 4.3: Interfejs CLI w C i porządki
+
+Stworzenie pętli wprowadzania komend w C (np. /join #room, /msg treść, /quit).
+
+Ładne parsowanie i czyszczenie pamięci (poprawne zwalnianie struktur protobuf-c oraz zamykanie gniazd zmq_close).
