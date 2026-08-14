@@ -1,4 +1,4 @@
-#ifndef ZQM_CLIENT_H
-#define ZQM_CLIENT_H
+#ifndef ZMQ_CLIENT_H
+#define ZMQ_CLIENT_H
 int zmq_client_run(void);
-#endif  // !ZQM_CLIENT_H
+#endif  // !ZMQ_CLIENT_H

@@ -1,5 +1,5 @@
-#ifndef ZQM_CLIENT_SUB_H
-#define ZQM_CLIENT_SUB_H
+#ifndef ZMQ_CLIENT_SUB_H
+#define ZMQ_CLIENT_SUB_H
 
 #include <signal.h>
 
@@ -11,4 +11,4 @@ typedef struct
 } SubscriberArgs;
 
 void* subscriber_routine(void* arg);
-#endif  // !ZQM_CLIENT_SUB_H
+#endif  // !ZMQ_CLIENT_SUB_H
