@@ -1,5 +1,5 @@
-#include "zmq_client_req.h"
-#include "zmq_client_common.h"
+#include "chat_client_controller.h"
+#include "chat_client_common.h"
 
 #include "generated/chat.pb-c.h"
 #include <stdio.h>
@@ -11,58 +11,75 @@
 #include <poll.h>
 
 // Helper wysyłający i odbierający na REQ
-static Api__Chat__MessageEnvelope* send_and_recv_env(void* requester, Api__Chat__MessageEnvelope* envelope);
+static Api__Chat__MessageEnvelope* send_and_recv_env(void* socket_req_chat, Api__Chat__MessageEnvelope* envelope);
 
-static void handle_rooms_request(void* requester, void* command_socket);
+static void handle_rooms_request(void* socket_req_chat, void* socket_pair_ui_command);
 
-static void handle_room_join_request(void* requester, void* ctrl_pub, void* command_socket, char* line, char* username);
+static void handle_room_join_request(
+    void* socket_req_chat, void* socket_pair_receiver_ctrl, void* socket_pair_ui_command, char* line, char* username);
 
 static void handle_room_leave_request(
-    void* requester, void* ctrl_pub, void* command_socket, char* line, char* username);
+    void* socket_req_chat, void* socket_pair_receiver_ctrl, void* socket_pair_ui_command, char* line, char* username);
 
-static void handle_message_room_request(void* requester, void* command_socket, char* line, char* username);
+static void handle_message_room_request(void* socket_req_chat,
+                                        void* socket_pair_ui_command,
+                                        char* line,
+                                        char* username);
 
-static void handle_message_direct_request(void* requester, void* command_socket, char* line, char* username);
+static void handle_message_direct_request(void* socket_req_chat,
+                                          void* socket_pair_ui_command,
+                                          char* line,
+                                          char* username);
 
-static void clean_up(void* command_socket, void* requester, void* ctrl_pub, RequesterArgs* args);
+static void clean_up(void* socket_sub_shutdown,
+                     void* socket_req_chat,
+                     void* socket_pair_receiver_ctrl,
+                     void* socket_pair_ui_command);
 
-void* requester_routine(void* arg)
+void* routine_chat_controller(void* arg)
 {
-    printf("[ZMQClient][REQ Thread] start requester_routine\n");
+    printf("[ZMQClient][REQ Thread] start socket_req_chat_routine\n");
 
     struct pollfd pfd;
     pfd.fd     = STDIN_FILENO;
     pfd.events = POLLIN;
 
-    RequesterArgs*         args     = (RequesterArgs*)arg;
-    void*                  context  = args->context;
-    char*                  username = args->username;
-    volatile sig_atomic_t* running  = args->running;
+    ControllerArgs* args     = (ControllerArgs*)arg;
+    void*           context  = args->context;
+    char*           username = args->username;
 
-    // 1. Gniazdo SIECIOWE (REQ)
-    void* requester = zmq_socket(context, ZMQ_REQ);
-    if (zmq_connect(requester, REQ_ADDRESS) != 0)
+    // Control socket INPROC (SUB for kill/stop signal)
+    void* socket_sub_shutdown = zmq_socket(context, ZMQ_SUB);
+    if (zmq_connect(socket_sub_shutdown, INPROC_SHUTDOWN_ADDR) == -1)
+    {
+        printf("[ZMQClient][REQ Thread] shutdown socket connect failed: %s\n", strerror(errno));
+        return NULL;
+    }
+
+    // REQ socket to server
+    void* socket_req_chat = zmq_socket(context, ZMQ_REQ);
+    if (zmq_connect(socket_req_chat, CHAT_SERVER_REQ_ADDRESS) != 0)
     {
         perror("[REQ Thread] REQ connection error");
-        clean_up(NULL, requester, NULL, args);
+        clean_up(socket_sub_shutdown, socket_req_chat, NULL, NULL);
         return NULL;
     }
 
-    // 2. Gniazdo STERUJĄCE (PAIR do wątku SUB)
-    void* ctrl_pub = zmq_socket(context, ZMQ_PAIR);
-    if (zmq_bind(ctrl_pub, SUB_CONTROLL_ADDRESS) != 0)
+    // PAIR socket to receiver
+    void* socket_pair_receiver_ctrl = zmq_socket(context, ZMQ_PAIR);
+    if (zmq_bind(socket_pair_receiver_ctrl, CONTROLLER_RECEIVER_COMMAND_ADDRESS) != 0)
     {
-        perror("[REQ Thread] bind inproc://sub-control error");
-        clean_up(NULL, requester, ctrl_pub, args);
+        perror("[REQ Thread] bind inproc://receiver-control error");
+        clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, NULL);
         return NULL;
     }
 
-    // 3. Gniazdo KOMEND (PAIR z wątkiem UI)
-    void* command_socket = zmq_socket(context, ZMQ_PAIR);
-    if (zmq_bind(command_socket, COMMAND_SOCKET_ADDRESS) != 0)
+    // PAIR socket to UI
+    void* socket_pair_ui_command = zmq_socket(context, ZMQ_PAIR);
+    if (zmq_bind(socket_pair_ui_command, CONROLLER_UI_COMMAND_ADDRESS) != 0)
     {
         perror("[REQ Thread] bind inproc://command-socket error");
-        clean_up(NULL, requester, ctrl_pub, args);
+        clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command);
         return NULL;
     }
 
@@ -76,22 +93,24 @@ void* requester_routine(void* arg)
     env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LOGIN_REQ;
     env.login_req                  = &login_req;
 
-    Api__Chat__MessageEnvelope* resp = send_and_recv_env(requester, &env);
+    Api__Chat__MessageEnvelope* resp = send_and_recv_env(socket_req_chat, &env);
     if (!resp || resp->payload_case != API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LOGIN_RESP
         || resp->login_resp->status != API__CHAT__STATUS__STATUS_OK)
     {
         printf("[REQ Thread] login failed!\n");
-        clean_up(command_socket, requester, ctrl_pub, args);
+        clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command);
         return NULL;
     }
     api__chat__message_envelope__free_unpacked(resp, NULL);
     printf("[REQ Thread] login success as '%s'!\n", username);
 
-    // 5. Pętla obsługi poleceń z wątku UI
-    while (running && *running)
+    // TODO: add shutdown handing
+
+    //  5. Pętla obsługi poleceń z wątku UI
+    while (1)
     {
         char cmd_buf[512];
-        int  bytes = zmq_recv(command_socket, cmd_buf, sizeof(cmd_buf) - 1, 0);
+        int  bytes = zmq_recv(socket_pair_ui_command, cmd_buf, sizeof(cmd_buf) - 1, 0);
         if (bytes <= 0)
         {
             break;
@@ -105,36 +124,39 @@ void* requester_routine(void* arg)
 
         if (strcmp(cmd_buf, "/rooms") == 0)
         {
-            handle_rooms_request(requester, command_socket);
+            handle_rooms_request(socket_req_chat, socket_pair_ui_command);
         }
         else if (strncmp(cmd_buf, "/join ", 6) == 0)
         {
-            handle_room_join_request(requester, ctrl_pub, command_socket, cmd_buf, username);
+            handle_room_join_request(
+                socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
         }
         else if (strncmp(cmd_buf, "/leave ", 7) == 0)
         {
-            handle_room_leave_request(requester, ctrl_pub, command_socket, cmd_buf, username);
+            handle_room_leave_request(
+                socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
         }
         else if (strncmp(cmd_buf, "/msg ", 5) == 0)
         {
-            handle_message_room_request(requester, command_socket, cmd_buf, username);
+            handle_message_room_request(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
         }
         else if (strncmp(cmd_buf, "/dm ", 4) == 0)
         {
-            handle_message_direct_request(requester, command_socket, cmd_buf, username);
+            handle_message_direct_request(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
         }
         else
         {
-            zmq_send(command_socket, "Nieznana komenda.", 17, 0);
+            zmq_send(socket_pair_ui_command, "Nieznana komenda.", 17, 0);
         }
     }
 
-    clean_up(command_socket, requester, ctrl_pub, args);
+    clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command);
+    zmq_close(socket_sub_shutdown);
     printf("[ZMQClient][REQ Thread] exit\n");
     return NULL;
 }
 
-static void handle_rooms_request(void* requester, void* command_socket)
+static void handle_rooms_request(void* socket_req_chat, void* socket_pair_ui_command)
 {
     Api__Chat__ListRoomsRequest list_req = API__CHAT__LIST_ROOMS_REQUEST__INIT;
     Api__Chat__MessageEnvelope  req_env  = API__CHAT__MESSAGE_ENVELOPE__INIT;
@@ -142,7 +164,7 @@ static void handle_rooms_request(void* requester, void* command_socket)
     req_env.payload_case                 = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LIST_ROOMS_REQ;
     req_env.list_rooms_req               = &list_req;
 
-    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
 
     char out_buf[1024] = "Nie udało się pobrać listy pokojów.";
     if (res_env && res_env->payload_case == API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LIST_ROOMS_RESP)
@@ -160,7 +182,7 @@ static void handle_rooms_request(void* requester, void* command_socket)
         }
     }
 
-    zmq_send(command_socket, out_buf, strlen(out_buf), 0);
+    zmq_send(socket_pair_ui_command, out_buf, strlen(out_buf), 0);
 
     if (res_env)
     {
@@ -168,7 +190,8 @@ static void handle_rooms_request(void* requester, void* command_socket)
     }
 }
 
-static void handle_room_join_request(void* requester, void* ctrl_pub, void* command_socket, char* line, char* username)
+static void handle_room_join_request(
+    void* socket_req_chat, void* socket_pair_receiver_ctrl, void* socket_pair_ui_command, char* line, char* username)
 {
     char* room_name = line + 6;
 
@@ -181,7 +204,7 @@ static void handle_room_join_request(void* requester, void* ctrl_pub, void* comm
     req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_JOIN_ROOM_REQ;
     req_env.join_room_req              = &join_req;
 
-    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
 
     char out_buf[256] = "Błąd dołączania do pokoju.";
     if (res_env && res_env->payload_case == API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ACK)
@@ -191,10 +214,10 @@ static void handle_room_join_request(void* requester, void* ctrl_pub, void* comm
         // Wysyłamy komendę do wątku SUB po szynie inproc
         char ctrl_cmd[128];
         snprintf(ctrl_cmd, sizeof(ctrl_cmd), "+room:%s", room_name);
-        zmq_send(ctrl_pub, ctrl_cmd, strlen(ctrl_cmd), 0);
+        zmq_send(socket_pair_receiver_ctrl, ctrl_cmd, strlen(ctrl_cmd), 0);
     }
 
-    zmq_send(command_socket, out_buf, strlen(out_buf), 0);
+    zmq_send(socket_pair_ui_command, out_buf, strlen(out_buf), 0);
 
     if (res_env)
     {
@@ -202,24 +225,25 @@ static void handle_room_join_request(void* requester, void* ctrl_pub, void* comm
     }
 }
 
-static Api__Chat__MessageEnvelope* send_and_recv_env(void* requester, Api__Chat__MessageEnvelope* envelope)
+static Api__Chat__MessageEnvelope* send_and_recv_env(void* socket_req_chat, Api__Chat__MessageEnvelope* envelope)
 {
     size_t   envelope_packed_size = api__chat__message_envelope__get_packed_size(envelope);
     uint8_t* envelope_buffer      = malloc(envelope_packed_size);
     api__chat__message_envelope__pack(envelope, envelope_buffer);
 
-    zmq_send(requester, envelope_buffer, envelope_packed_size, 0);
+    zmq_send(socket_req_chat, envelope_buffer, envelope_packed_size, 0);
     free(envelope_buffer);
 
     uint8_t received_buffer[4096];
-    int     received_bytes_number = zmq_recv(requester, received_buffer, sizeof(received_buffer), 0);
+    int     received_bytes_number = zmq_recv(socket_req_chat, received_buffer, sizeof(received_buffer), 0);
     if (received_bytes_number < 0)
         return NULL;
 
     return api__chat__message_envelope__unpack(NULL, received_bytes_number, received_buffer);
 }
 
-static void handle_room_leave_request(void* requester, void* ctrl_pub, void* command_socket, char* line, char* username)
+static void handle_room_leave_request(
+    void* socket_req_chat, void* socket_pair_receiver_ctrl, void* socket_pair_ui_command, char* line, char* username)
 {
     char* room_name = line + 7;
 
@@ -232,7 +256,7 @@ static void handle_room_leave_request(void* requester, void* ctrl_pub, void* com
     req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LEAVE_ROOM_REQ;
     req_env.leave_room_req             = &leave_req;
 
-    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
 
     char out_buf[256] = "Błąd opuszczania pokoju.";
     if (res_env && res_env->payload_case == API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ACK)
@@ -241,10 +265,10 @@ static void handle_room_leave_request(void* requester, void* ctrl_pub, void* com
 
         char ctrl_cmd[128];
         snprintf(ctrl_cmd, sizeof(ctrl_cmd), "-room:%s", room_name);
-        zmq_send(ctrl_pub, ctrl_cmd, strlen(ctrl_cmd), 0);
+        zmq_send(socket_pair_receiver_ctrl, ctrl_cmd, strlen(ctrl_cmd), 0);
     }
 
-    zmq_send(command_socket, out_buf, strlen(out_buf), 0);
+    zmq_send(socket_pair_ui_command, out_buf, strlen(out_buf), 0);
 
     if (res_env)
     {
@@ -252,7 +276,7 @@ static void handle_room_leave_request(void* requester, void* ctrl_pub, void* com
     }
 }
 
-static void handle_message_room_request(void* requester, void* command_socket, char* line, char* username)
+static void handle_message_room_request(void* socket_req_chat, void* socket_pair_ui_command, char* line, char* username)
 {
     char* room_name = strtok(line + 5, " ");
     char* content   = strtok(NULL, "");
@@ -269,24 +293,27 @@ static void handle_message_room_request(void* requester, void* command_socket, c
         req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ROOM_MSG;
         req_env.room_msg                   = &rmsg;
 
-        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
         if (res_env)
         {
-            zmq_send(command_socket, "[ACK] Wiadomość wysłana", 22, 0);
+            zmq_send(socket_pair_ui_command, "[ACK] Wiadomość wysłana", 22, 0);
             api__chat__message_envelope__free_unpacked(res_env, NULL);
         }
         else
         {
-            zmq_send(command_socket, "[ERR] Błąd wysyłania wiadomości", 31, 0);
+            zmq_send(socket_pair_ui_command, "[ERR] Błąd wysyłania wiadomości", 31, 0);
         }
     }
     else
     {
-        zmq_send(command_socket, "Użycie: /msg <nazwa_pokoju> <treść>", 35, 0);
+        zmq_send(socket_pair_ui_command, "Użycie: /msg <nazwa_pokoju> <treść>", 35, 0);
     }
 }
 
-static void handle_message_direct_request(void* requester, void* command_socket, char* line, char* username)
+static void handle_message_direct_request(void* socket_req_chat,
+                                          void* socket_pair_ui_command,
+                                          char* line,
+                                          char* username)
 {
     char* target  = strtok(line + 4, " ");
     char* content = strtok(NULL, "");
@@ -303,39 +330,42 @@ static void handle_message_direct_request(void* requester, void* command_socket,
         req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_DIRECT_MSG;
         req_env.direct_msg                 = &dm;
 
-        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(requester, &req_env);
+        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
         if (res_env)
         {
-            zmq_send(command_socket, "[ACK] Wiadomość prywatna wysłana", 32, 0);
+            zmq_send(socket_pair_ui_command, "[ACK] Wiadomość prywatna wysłana", 32, 0);
             api__chat__message_envelope__free_unpacked(res_env, NULL);
         }
         else
         {
-            zmq_send(command_socket, "[ERR] Błąd wysyłania DM", 23, 0);
+            zmq_send(socket_pair_ui_command, "[ERR] Błąd wysyłania DM", 23, 0);
         }
     }
     else
     {
-        zmq_send(command_socket, "Użycie: /dm <użytkownik> <treść>", 32, 0);
+        zmq_send(socket_pair_ui_command, "Użycie: /dm <użytkownik> <treść>", 32, 0);
     }
 }
 
-static void clean_up(void* command_socket, void* requester, void* ctrl_pub, RequesterArgs* args)
+static void clean_up(void* socket_sub_shutdown,
+                     void* socket_req_chat,
+                     void* socket_pair_ui_command,
+                     void* socket_pair_receiver_ctrl)
 {
-    if (command_socket)
+    if (socket_sub_shutdown)
     {
-        zmq_close(command_socket);
+        zmq_close(socket_sub_shutdown);
     }
-    if (requester)
+    if (socket_req_chat)
     {
-        zmq_close(requester);
+        zmq_close(socket_req_chat);
     }
-    if (ctrl_pub)
+    if (socket_pair_ui_command)
     {
-        zmq_close(ctrl_pub);
+        zmq_close(socket_pair_ui_command);
     }
-    if (args)
+    if (socket_pair_receiver_ctrl)
     {
-        free(args);
+        zmq_close(socket_pair_receiver_ctrl);
     }
 }

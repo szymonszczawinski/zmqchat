@@ -1,5 +1,5 @@
-#include "zmq_client_sub.h"
-#include "zmq_client_common.h"
+#include "chat_client_receiver.h"
+#include "chat_client_common.h"
 
 #include "generated/chat.pb-c.h"
 #include <stdio.h>
@@ -9,43 +9,48 @@
 #include <pthread.h>
 #include <zmq.h>
 
-static void handle_pub_sub_message(void* subscriber, void* ui_pub);
+static void handle_chat_message(void* subscriber, void* ui_pub);
 static void handle_command(void* ctrl_sub, void* subscriber);
 
-void* subscriber_routine(void* arg)
+void* routine_chat_receiver(void* arg)
 {
     printf("[ZMQClient][SUB Thread] start subscriber_routine\n");
-    SubscriberArgs*        args    = (SubscriberArgs*)arg;
-    void*                  context = args->context;
-    volatile sig_atomic_t* running = args->running;
+    ReceiverArgs* args    = (ReceiverArgs*)arg;
+    void*         context = args->context;
 
-    // 1. Gniazdo SIECIOWE (ZMQ_SUB)
-    void* subscriber = zmq_socket(context, ZMQ_SUB);
-    if (zmq_connect(subscriber, SUB_ADDRESS) != 0)
+    // Control socket INPROC (SUB for kill/stop signal)
+    void* socket_sub_shutdown = zmq_socket(context, ZMQ_SUB);
+    if (zmq_connect(socket_sub_shutdown, INPROC_SHUTDOWN_ADDR) == -1)
+    {
+        printf("[ZMQClient][SUB Thread] shutdown socket connect failed: %s\n", strerror(errno));
+        return NULL;
+    }
+    zmq_setsockopt(socket_sub_shutdown, ZMQ_SUBSCRIBE, "", 0);  // subscribe all
+
+    // SUB socket for subscribing for server chat messages
+    void* socket_sub_chat = zmq_socket(context, ZMQ_SUB);
+    if (zmq_connect(socket_sub_chat, CHAT_SERVER_SUB_ADDRESS) != 0)
     {
         perror("[ZMQClient][SUB Thread] Błąd połączenia z PUB");
-        free(args);
         return NULL;
     }
 
-    // 2. Gniazdo STERUJĄCE z wątku REQ (ZMQ_PAIR)
-    void* ctrl_sub = zmq_socket(context, ZMQ_PAIR);
-    if (zmq_connect(ctrl_sub, SUB_CONTROLL_ADDRESS) != 0)
+    // PAIR controller commands socket
+    void* socket_pair_controller_command = zmq_socket(context, ZMQ_PAIR);
+    if (zmq_connect(socket_pair_controller_command, CONTROLLER_RECEIVER_COMMAND_ADDRESS) != 0)
     {
-        perror("[SUB Thread] Błąd połączenia z SUB_CONTROLL_ADDRESS");
-        zmq_close(subscriber);
-        free(args);
+        perror("[SUB Thread] Błąd połączenia z CONTROLLER_RECEIVER_COMMAND_ADDRESS");
+        zmq_close(socket_sub_chat);
         return NULL;
     }
 
-    // 3. Gniazdo NOTYFIKACJI do wątku UI (ZMQ_PAIR lub ZMQ_PUSH)
-    void* ui_pub = zmq_socket(context, ZMQ_PAIR);
-    if (zmq_connect(ui_pub, UI_NOTIF_ADDRESS) != 0)
+    // PAIR ui notifications socket
+    void* socket_pair_ui_notification = zmq_socket(context, ZMQ_PAIR);
+    if (zmq_connect(socket_pair_ui_notification, CONTROLLER_UI_NOTIFICATION_ADDRESS) != 0)
     {
         perror("[SUB Thread] Błąd połączenia z UI_NOTIF_ADDRESS");
-        zmq_close(subscriber);
-        zmq_close(ctrl_sub);
-        free(args);
+        zmq_close(socket_sub_chat);
+        zmq_close(socket_pair_controller_command);
         return NULL;
     }
     // Subskrypcje początkowe
@@ -53,14 +58,15 @@ void* subscriber_routine(void* arg)
     snprintf(user_topic, sizeof(user_topic), "user:%s", args->username);
     snprintf(room_general, sizeof(room_general), "room:general");
 
-    zmq_setsockopt(subscriber, ZMQ_SUBSCRIBE, user_topic, strlen(user_topic));
-    zmq_setsockopt(subscriber, ZMQ_SUBSCRIBE, room_general, strlen(room_general));
+    zmq_setsockopt(socket_sub_chat, ZMQ_SUBSCRIBE, user_topic, strlen(user_topic));
+    zmq_setsockopt(socket_sub_chat, ZMQ_SUBSCRIBE, room_general, strlen(room_general));
 
     zmq_pollitem_t items[] = {
-        { subscriber, 0, ZMQ_POLLIN, 0 },  // 0: Wiadomości sieciowe (PUB/SUB)
-        { ctrl_sub, 0, ZMQ_POLLIN, 0 }     // 1: Komendy sterujące z REQ (inproc)
+        { socket_sub_chat, 0, ZMQ_POLLIN, 0 },                // 0: Wiadomości sieciowe (PUB/SUB)
+        { socket_pair_controller_command, 0, ZMQ_POLLIN, 0 }  // 1: Komendy sterujące z REQ (inproc)
     };
-    while (running && *running)
+    // TODO: add shutdown handling
+    while (1)
     {
         int rc = zmq_poll(items, 2, 100);
         if (rc < 0)
@@ -70,33 +76,33 @@ void* subscriber_routine(void* arg)
 
         if (items[0].revents & ZMQ_POLLIN)
         {
-            handle_pub_sub_message(subscriber, ui_pub);
+            handle_chat_message(socket_sub_chat, socket_pair_ui_notification);
         }
 
         if (items[1].revents & ZMQ_POLLIN)
         {
-            handle_command(ctrl_sub, subscriber);
+            handle_command(socket_pair_controller_command, socket_sub_chat);
         }
     }
-    zmq_close(subscriber);
-    zmq_close(ctrl_sub);
-    zmq_close(ui_pub);
-    free(args);
+    zmq_close(socket_sub_chat);
+    zmq_close(socket_pair_controller_command);
+    zmq_close(socket_pair_ui_notification);
+    zmq_close(socket_sub_shutdown);
     printf("[ZMQClient][SUB Thread] exit\n");
     return NULL;
 }
 
-static void handle_pub_sub_message(void* subscriber, void* ui_pub)
+static void handle_chat_message(void* socket_sub_chat, void* socket_pair_ui_notification)
 {
     char topic_buffer[256];
-    int  topic_len = zmq_recv(subscriber, topic_buffer, sizeof(topic_buffer) - 1, 0);
+    int  topic_len = zmq_recv(socket_sub_chat, topic_buffer, sizeof(topic_buffer) - 1, 0);
     if (topic_len <= 0)
         return;
 
     topic_buffer[topic_len] = '\0';
 
     uint8_t data_buffer[2048];
-    int     data_len = zmq_recv(subscriber, data_buffer, sizeof(data_buffer), 0);
+    int     data_len = zmq_recv(socket_sub_chat, data_buffer, sizeof(data_buffer), 0);
     if (data_len <= 0)
         return;
 
@@ -139,17 +145,17 @@ static void handle_pub_sub_message(void* subscriber, void* ui_pub)
     // Wysyłamy sformatowaną wiadomość tekstową do wątku UI
     if (strlen(formatted_msg) > 0)
     {
-        zmq_send(ui_pub, formatted_msg, strlen(formatted_msg), 0);
+        zmq_send(socket_pair_ui_notification, formatted_msg, strlen(formatted_msg), 0);
     }
 
     api__chat__message_envelope__free_unpacked(envelope, NULL);
 }
 
-static void handle_command(void* ctrl_sub, void* subscriber)
+static void handle_command(void* socket_pair_controller_command, void* socket_sub_chat)
 {
     printf("[ZMQClient][SUB Thread] handle_command\n");
     char ctrl_buf[256];
-    int  len = zmq_recv(ctrl_sub, ctrl_buf, sizeof(ctrl_buf) - 1, 0);
+    int  len = zmq_recv(socket_pair_controller_command, ctrl_buf, sizeof(ctrl_buf) - 1, 0);
     if (len > 0)
     {
         ctrl_buf[len] = '\0';
@@ -158,12 +164,12 @@ static void handle_command(void* ctrl_sub, void* subscriber)
         if (ctrl_buf[0] == '+')
         {
             char* topic = ctrl_buf + 1;
-            zmq_setsockopt(subscriber, ZMQ_SUBSCRIBE, topic, strlen(topic));
+            zmq_setsockopt(socket_sub_chat, ZMQ_SUBSCRIBE, topic, strlen(topic));
         }
         else if (ctrl_buf[0] == '-')
         {
             char* topic = ctrl_buf + 1;
-            zmq_setsockopt(subscriber, ZMQ_UNSUBSCRIBE, topic, strlen(topic));
+            zmq_setsockopt(socket_sub_chat, ZMQ_UNSUBSCRIBE, topic, strlen(topic));
         }
     }
 }
