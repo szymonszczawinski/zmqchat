@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+
 	chat "zmqcharserver/api/chat/v1"
 
 	zmq "github.com/pebbe/zmq4"
@@ -75,7 +76,6 @@ func (s *ZmqSocket) PublishTopicEnvelope(topic string, env *chat.MessageEnvelope
 	if _, err := s.sock.Send(topic, zmq.SNDMORE); err != nil {
 		return err
 	}
-
 	// Ramka 2: Payload Protobuf
 	_, err = s.sock.SendBytes(outBytes, 0)
 	return err

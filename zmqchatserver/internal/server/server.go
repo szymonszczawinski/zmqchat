@@ -61,6 +61,7 @@ func (srv *ZmqServer) Start() {
 
 // Router to handle received commands
 func (srv *ZmqServer) handleEnvelope(env *chat.MessageEnvelope) {
+	slog.Info("[ZmqServer] handleEnvelope")
 	switch payload := env.Payload.(type) {
 
 	case *chat.MessageEnvelope_LoginReq:
@@ -91,6 +92,7 @@ func (srv *ZmqServer) handleEnvelope(env *chat.MessageEnvelope) {
 // --- HANDLERY POKOJOWE ---
 
 func (srv *ZmqServer) handleLogin(msgID string, req *chat.LoginRequest) {
+	slog.Info("[ZmqServer] handleLogin", "user", req.Username)
 	token := srv.sessions.CreateSession(req.GetUsername())
 
 	// Domyślnie dopisujemy usera do pokoju general
@@ -149,6 +151,7 @@ func (srv *ZmqServer) handleLeaveRoom(msgID string, req *chat.LeaveRoomRequest) 
 
 func (srv *ZmqServer) handleListRooms(msgID string) {
 	roomsInfo := srv.rooms.GetRoomsInfo()
+	slog.Info("[ZmqServer] handleRooms", "rooms", roomsInfo)
 
 	srv.repSock.SendEnvelope(&chat.MessageEnvelope{
 		MessageId: msgID,
@@ -162,6 +165,7 @@ func (srv *ZmqServer) handleListRooms(msgID string) {
 }
 
 func (srv *ZmqServer) handleRoomMessage(msgID string, req *chat.RoomMessage, rawEnv *chat.MessageEnvelope) {
+	slog.Info("[ZmqServer] handleRoomMessage", "room", req.RoomName, "sender", req.SenderUsername, "message", req.Content)
 	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, "Wysłano")
 	topic := fmt.Sprintf("room:%s", req.GetRoomName())
 	srv.pubSock.PublishTopicEnvelope(topic, rawEnv)
