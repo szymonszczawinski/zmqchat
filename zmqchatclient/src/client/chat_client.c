@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "chat_client.h"
 #include "chat_client_controller.h"
 #include "chat_client_receiver.h"
@@ -49,7 +50,7 @@ int zmq_client_run(void)
     UiArgs*   args_ui = malloc(sizeof(UiArgs));
     args_ui->context  = zmqcontext;
     strncpy(args_ui->username, username, sizeof(args_ui->username));
-    pthread_create(&thread_ui, NULL, routine_chat_ui, args_controller);
+    pthread_create(&thread_ui, NULL, routine_chat_ui, args_ui);
 
     // main thread blocks on sygnal Ctrl+C
     zmq_pollitem_t items[] = { { NULL, sig_fd, ZMQ_POLLIN, 0 } };
@@ -60,7 +61,7 @@ int zmq_client_run(void)
     printf("\n[MAIN] Ctrl+C! sending KILL via INPROC...\n");
 
     // sending KILL to all threads
-    socket_pub_send(socket_pub_shutdown, "KILL", 4, 0);
+    socket_pub_send(socket_pub_shutdown, CHAT_MESSAGE_KILL, 4, 0);
     printf("[ZMQClient] context closed...\n");
     pthread_join(thread_receiver, NULL);
     pthread_join(thread_controller, NULL);

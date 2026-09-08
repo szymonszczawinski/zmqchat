@@ -10,12 +10,18 @@ typedef struct socket_req  socket_req_t;
 typedef struct socket_rep  socket_rep_t;
 typedef struct socket_pair socket_pair_t;
 
+void* socket_sub_get_raw(socket_sub_t* self);
+void* socket_pub_get_raw(socket_pub_t* self);
+void* socket_req_get_raw(socket_req_t* self);
+void* socket_rep_get_raw(socket_rep_t* self);
+void* socket_pair_get_raw(socket_pair_t* self);
 // SUB
 
 socket_sub_t* socket_sub_new(void* zmq_context);
 void          socket_sub_destroy(socket_sub_t** self_p);
 int           socket_sub_connect(socket_sub_t* sub, const char* endpoint);
 int           socket_sub_subscribe(socket_sub_t* sub, const char* topic);
+int           socket_sub_unsubscribe(socket_sub_t* sub, const char* topic);
 int           socket_sub_recv(socket_sub_t* sub, void* buf, size_t len, int flags);
 
 // PUB

@@ -62,6 +62,36 @@ IMPL_SOCKET_LIFECYCLE(socket_req, ZMQ_REQ)
 IMPL_SOCKET_LIFECYCLE(socket_rep, ZMQ_REP)
 IMPL_SOCKET_LIFECYCLE(socket_pair, ZMQ_PAIR)
 
+// get raw zmq socket from specific SUB socket type
+void* socket_sub_get_raw(socket_sub_t* self)
+{
+    return self ? self->zmq_socket : NULL;
+}
+
+// get raw zmq socket from specific PUB socket type
+void* socket_pub_get_raw(socket_pub_t* self)
+{
+    return self ? self->zmq_socket : NULL;
+}
+
+// get raw zmq socket from specific REQ socket type
+void* socket_req_get_raw(socket_req_t* self)
+{
+    return self ? self->zmq_socket : NULL;
+}
+
+// get raw zmq socket from specific REP socket type
+void* socket_rep_get_raw(socket_rep_t* self)
+{
+    return self ? self->zmq_socket : NULL;
+}
+
+// get raw zmq socket from specific PAIR socket type
+void* socket_pair_get_raw(socket_pair_t* self)
+{
+    return self ? self->zmq_socket : NULL;
+}
+
 // --- SUB ---
 int socket_sub_connect(socket_sub_t* sub, const char* ep)
 {
@@ -71,6 +101,11 @@ int socket_sub_connect(socket_sub_t* sub, const char* ep)
 int socket_sub_subscribe(socket_sub_t* sub, const char* topic)
 {
     return sub ? zmq_setsockopt(sub->zmq_socket, ZMQ_SUBSCRIBE, topic, strlen(topic)) : -1;
+}
+
+int socket_sub_unsubscribe(socket_sub_t* sub, const char* topic)
+{
+    return sub ? zmq_setsockopt(sub->zmq_socket, ZMQ_UNSUBSCRIBE, topic, strlen(topic)) : -1;
 }
 
 int socket_sub_recv(socket_sub_t* sub, void* buf, size_t len, int flags)
