@@ -3,6 +3,7 @@
 #include "chat_client_receiver.h"
 #include "chat_client_ui.h"
 #include "chat_client_common.h"
+#include "chat_client_socket.h"
 #include "utils/signal_handler.h"
 #include <assert.h>
 #include <stdio.h>
@@ -28,8 +29,9 @@ int zmq_client_run(void)
     void* zmqcontext = zmq_ctx_new();
     assert(zmqcontext);
     // create PUB socket to send KILL signal via INPROC
-    void* socket_pub_shutdown = zmq_socket(zmqcontext, ZMQ_PUB);
-    zmq_bind(socket_pub_shutdown, INPROC_SHUTDOWN_ADDR);
+    // void* socket_pub_shutdown = zmq_socket(zmqcontext, ZMQ_PUB);
+    socket_pub_t* socket_pub_shutdown = socket_pub_new(zmqcontext);
+    socket_pub_bind(socket_pub_shutdown, INPROC_SHUTDOWN_ADDR);
 
     pthread_t     thread_receiver;
     ReceiverArgs* args_receiver = malloc(sizeof(ReceiverArgs));
@@ -59,7 +61,7 @@ int zmq_client_run(void)
 
     // sending KILL to all threads
     zmq_send(socket_pub_shutdown, "KILL", 4, 0);
-
+    socket_pub_send(socket_pub_shutdown, "KILL", 4, 0);
     printf("[ZMQClient] context closed...\n");
     pthread_join(thread_receiver, NULL);
     pthread_join(thread_controller, NULL);
@@ -68,7 +70,7 @@ int zmq_client_run(void)
     printf("[MAIN] threads finished. Clean ZMQ context...\n");
 
     // close control socket and close zmq context
-    zmq_close(socket_pub_shutdown);
+    socket_pub_destroy(&socket_pub_shutdown);
     zmq_ctx_destroy(zmqcontext);
 
     free(args_controller);
