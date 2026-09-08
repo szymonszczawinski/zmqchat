@@ -60,7 +60,6 @@ int zmq_client_run(void)
     printf("\n[MAIN] Ctrl+C! sending KILL via INPROC...\n");
 
     // sending KILL to all threads
-    zmq_send(socket_pub_shutdown, "KILL", 4, 0);
     socket_pub_send(socket_pub_shutdown, "KILL", 4, 0);
     printf("[ZMQClient] context closed...\n");
     pthread_join(thread_receiver, NULL);

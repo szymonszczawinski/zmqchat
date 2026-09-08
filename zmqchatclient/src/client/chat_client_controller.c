@@ -40,10 +40,6 @@ void* routine_chat_controller(void* arg)
 {
     printf("[ZMQClient][REQ Thread] start socket_req_chat_routine\n");
 
-    struct pollfd pfd;
-    pfd.fd     = STDIN_FILENO;
-    pfd.events = POLLIN;
-
     ControllerArgs* args     = (ControllerArgs*)arg;
     void*           context  = args->context;
     char*           username = args->username;
@@ -55,7 +51,12 @@ void* routine_chat_controller(void* arg)
         printf("[ZMQClient][REQ Thread] shutdown socket connect failed: %s\n", strerror(errno));
         return NULL;
     }
-
+    if (zmq_setsockopt(socket_sub_shutdown, ZMQ_SUBSCRIBE, "", 0) != 0)
+    {
+        printf("[ZMQClient][REQ Thread] shutdown socket subscribe failed: %s\n", strerror(errno));
+        zmq_close(socket_sub_shutdown);
+        return NULL;
+    }
     // REQ socket to server
     void* socket_req_chat = zmq_socket(context, ZMQ_REQ);
     if (zmq_connect(socket_req_chat, CHAT_SERVER_REQ_ADDRESS) != 0)
@@ -104,49 +105,81 @@ void* routine_chat_controller(void* arg)
     api__chat__message_envelope__free_unpacked(resp, NULL);
     printf("[REQ Thread] login success as '%s'!\n", username);
 
-    // TODO: add shutdown handing
+    zmq_pollitem_t items[]
+        = { { socket_sub_shutdown, 0, ZMQ_POLLIN, 0 }, { socket_pair_ui_command, 0, ZMQ_POLLIN, 0 } };
 
     //  5. Pętla obsługi poleceń z wątku UI
     while (1)
     {
-        char cmd_buf[512];
-        int  bytes = zmq_recv(socket_pair_ui_command, cmd_buf, sizeof(cmd_buf) - 1, 0);
-        if (bytes <= 0)
+        // Wątek bezpiecznie "śpi", czekając na jedno z dwóch zdarzeń
+        int rc = zmq_poll(items, 2, -1);
+        if (rc < 0)
         {
+            if (errno == EINTR)
+            {
+                continue;  // Przerwanie sygnałem systemowym - ponawiamy poll
+            }
+            perror("[REQ Thread] zmq_poll error");
             break;
         }
-        cmd_buf[bytes] = '\0';
 
-        if (strcmp(cmd_buf, "/quit") == 0)
+        // --- A. ODBIERANIE SYGNAŁU SHUTDOWN ("KILL") ---
+        if (items[0].revents & ZMQ_POLLIN)
         {
-            break;
+            char shutdown_msg[1];
+            int  bytes = zmq_recv(socket_sub_shutdown, shutdown_msg, sizeof(shutdown_msg) - 1, 0);
+            if (bytes > 0)
+            {
+                shutdown_msg[bytes] = '\0';
+                if (strcmp(shutdown_msg, "KILL") == 0)
+                {
+                    printf("[REQ Thread] Received KILL signal. Shutting down cleanly...\n");
+                    break;
+                }
+            }
         }
+        // --- B. ODBIERANIE KOMEND Z WĄTKU UI (ZMQ_PAIR) ---
+        if (items[1].revents & ZMQ_POLLIN)
+        {
+            char cmd_buf[512];
+            int  bytes = zmq_recv(socket_pair_ui_command, cmd_buf, sizeof(cmd_buf) - 1, 0);
+            if (bytes <= 0)
+            {
+                break;
+            }
+            cmd_buf[bytes] = '\0';
 
-        if (strcmp(cmd_buf, "/rooms") == 0)
-        {
-            handle_rooms_request(socket_req_chat, socket_pair_ui_command);
-        }
-        else if (strncmp(cmd_buf, "/join ", 6) == 0)
-        {
-            handle_room_join_request(
-                socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
-        }
-        else if (strncmp(cmd_buf, "/leave ", 7) == 0)
-        {
-            handle_room_leave_request(
-                socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
-        }
-        else if (strncmp(cmd_buf, "/msg ", 5) == 0)
-        {
-            handle_message_room_request(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
-        }
-        else if (strncmp(cmd_buf, "/dm ", 4) == 0)
-        {
-            handle_message_direct_request(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
-        }
-        else
-        {
-            zmq_send(socket_pair_ui_command, "Nieznana komenda.", 17, 0);
+            if (strcmp(cmd_buf, "/quit") == 0)
+            {
+                break;
+            }
+
+            if (strcmp(cmd_buf, "/rooms") == 0)
+            {
+                handle_rooms_request(socket_req_chat, socket_pair_ui_command);
+            }
+            else if (strncmp(cmd_buf, "/join ", 6) == 0)
+            {
+                handle_room_join_request(
+                    socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
+            }
+            else if (strncmp(cmd_buf, "/leave ", 7) == 0)
+            {
+                handle_room_leave_request(
+                    socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
+            }
+            else if (strncmp(cmd_buf, "/msg ", 5) == 0)
+            {
+                handle_message_room_request(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
+            }
+            else if (strncmp(cmd_buf, "/dm ", 4) == 0)
+            {
+                handle_message_direct_request(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
+            }
+            else
+            {
+                zmq_send(socket_pair_ui_command, "Nieznana komenda.", 17, 0);
+            }
         }
     }
 

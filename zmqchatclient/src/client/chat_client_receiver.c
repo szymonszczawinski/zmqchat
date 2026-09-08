@@ -25,7 +25,12 @@ void* routine_chat_receiver(void* arg)
         printf("[ZMQClient][SUB Thread] shutdown socket connect failed: %s\n", strerror(errno));
         return NULL;
     }
-    zmq_setsockopt(socket_sub_shutdown, ZMQ_SUBSCRIBE, "", 0);  // subscribe all
+    if (zmq_setsockopt(socket_sub_shutdown, ZMQ_SUBSCRIBE, "", 0) != 0)
+    {
+        printf("[ZMQClient][UI Thread] shutdown socket subscribe failed: %s\n", strerror(errno));
+        zmq_close(socket_sub_shutdown);
+        return NULL;
+    }
 
     // SUB socket for subscribing for server chat messages
     void* socket_sub_chat = zmq_socket(context, ZMQ_SUB);
@@ -62,24 +67,38 @@ void* routine_chat_receiver(void* arg)
     zmq_setsockopt(socket_sub_chat, ZMQ_SUBSCRIBE, room_general, strlen(room_general));
 
     zmq_pollitem_t items[] = {
-        { socket_sub_chat, 0, ZMQ_POLLIN, 0 },                // 0: Wiadomości sieciowe (PUB/SUB)
-        { socket_pair_controller_command, 0, ZMQ_POLLIN, 0 }  // 1: Komendy sterujące z REQ (inproc)
+        { socket_sub_shutdown, 0, ZMQ_POLLIN, 0 },            // 0: Sygnał wyłączenia
+        { socket_sub_chat, 0, ZMQ_POLLIN, 0 },                // 1: Wiadomości sieciowe (PUB/SUB)
+        { socket_pair_controller_command, 0, ZMQ_POLLIN, 0 }  // 2: Komendy sterujące z REQ (inproc)
     };
-    // TODO: add shutdown handling
+
     while (1)
     {
-        int rc = zmq_poll(items, 2, 100);
+        int rc = zmq_poll(items, 3, -1);
         if (rc < 0)
         {
             break;
         }
-
         if (items[0].revents & ZMQ_POLLIN)
+        {
+            char shutdown_msg[1];  // Poprawna tablica znaków
+            int  bytes = zmq_recv(socket_sub_shutdown, shutdown_msg, sizeof(shutdown_msg) - 1, 0);
+            if (bytes > 0)
+            {
+                shutdown_msg[bytes] = '\0';
+                if (strcmp(shutdown_msg, "KILL") == 0)
+                {
+                    printf("[ZMQClient][SUB Thread] Received KILL signal. Shutting down cleanly...\n");
+                    break;
+                }
+            }
+        }
+        if (items[1].revents & ZMQ_POLLIN)
         {
             handle_chat_message(socket_sub_chat, socket_pair_ui_notification);
         }
 
-        if (items[1].revents & ZMQ_POLLIN)
+        if (items[2].revents & ZMQ_POLLIN)
         {
             handle_command(socket_pair_controller_command, socket_sub_chat);
         }

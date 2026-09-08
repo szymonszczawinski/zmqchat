@@ -26,6 +26,12 @@ void* routine_chat_ui(void* arg)
         printf("[ZMQClient][UI Thread] shutdown socket connect failed: %s\n", strerror(errno));
         return NULL;
     }
+    if (zmq_setsockopt(socket_sub_shutdown, ZMQ_SUBSCRIBE, "", 0) != 0)
+    {
+        printf("[ZMQClient][UI Thread] shutdown socket subscribe failed: %s\n", strerror(errno));
+        zmq_close(socket_sub_shutdown);
+        return NULL;
+    }
 
     // 1. Gniazdo do wysyłania komend do wątku REQ
     void* socket_pair_command = zmq_socket(context, ZMQ_PAIR);
@@ -53,62 +59,95 @@ void* routine_chat_ui(void* arg)
     printf("  /dm <użytkownik> <treść>   - wiadomość prywatna\n");
     printf("  /quit                      - wyjście\n\n");
 
-    struct pollfd std_pfd;
-    std_pfd.fd     = STDIN_FILENO;
-    std_pfd.events = POLLIN;
+    zmq_pollitem_t items[] = {
+        { socket_sub_shutdown, 0, ZMQ_POLLIN, 0 },
+        { socket_pair_sub, 0, ZMQ_POLLIN, 0 },
+        { NULL, STDIN_FILENO, ZMQ_POLLIN, 0 }  // Monitorowanie deskryptora systemowego
+    };
 
     char line[512];
+    printf("> ");
+    fflush(stdout);
 
-    // TODO: add shutdown handing
     while (1)
     {
-        printf("> ");
-        fflush(stdout);
-
-        // A. Sprawdzamy, czy przyszła wiadomość z wątku SUB (non-blocking recv)
-        char received_chat_message_buffer[1024];
-        int  received_message_bytes_number = zmq_recv(
-            socket_pair_sub, received_chat_message_buffer, sizeof(received_chat_message_buffer) - 1, ZMQ_DONTWAIT);
-        if (received_message_bytes_number > 0)
+        int rc = zmq_poll(items, 3, 100);
+        if (rc < 0)
         {
-            received_chat_message_buffer[received_message_bytes_number] = '\0';
-            print_received_chat_message(received_chat_message_buffer);
+            if (errno == EINTR)
+            {
+                continue;  // Przerwanie sygnałem systemowym - ponawiamy poll
+            }
+            perror("[ZMQClient][UI Thread] zmq_poll error");
+            break;
+        }
+
+        // "KILL" signal
+        if (items[0].revents & ZMQ_POLLIN)
+        {
+            char shutdown_msg[1];
+            int  bytes = zmq_recv(socket_sub_shutdown, shutdown_msg, sizeof(shutdown_msg) - 1, 0);
+            if (bytes > 0)
+            {
+                shutdown_msg[bytes] = '\0';
+                if (strcmp(shutdown_msg, "KILL") == 0)
+                {
+                    printf("\n[ZMQClient][UI Thread] Received KILL signal. Shutting down cleanly...\n");
+                    break;
+                }
+            }
+        }
+
+        //  SUB ->  UI
+        if (items[1].revents & ZMQ_POLLIN)
+        {
+            char received_chat_message_buffer[1024];
+            int  received_message_bytes_number
+                = zmq_recv(socket_pair_sub, received_chat_message_buffer, sizeof(received_chat_message_buffer) - 1, 0);
+            if (received_message_bytes_number > 0)
+            {
+                received_chat_message_buffer[received_message_bytes_number] = '\0';
+
+                print_received_chat_message(received_chat_message_buffer);
+                fflush(stdout);
+            }
+        }
+
+        // STDIN
+        if (items[2].revents & ZMQ_POLLIN)
+        {
+            if (!fgets(line, sizeof(line), stdin))
+            {
+                break;  // end of stream (np. Ctrl+D)
+            }
+
+            line[strcspn(line, "\r\n")] = 0;
+            if (strlen(line) == 0)
+            {
+                printf("> ");
+                fflush(stdout);
+                continue;
+            }
+
+            if (strcmp(line, "/quit") == 0)
+            {
+                zmq_send(socket_pair_command, "/quit", 5, 0);
+                break;
+            }
+
+            // send to REQ and wait for (ACK/ERR)
+            zmq_send(socket_pair_command, line, strlen(line), 0);
+
+            char response_buf[2048];
+            int  bytes = zmq_recv(socket_pair_command, response_buf, sizeof(response_buf) - 1, 0);
+            if (bytes > 0)
+            {
+                response_buf[bytes] = '\0';
+                print_received_chat_message(response_buf);
+            }
+
+            printf("> ");
             fflush(stdout);
-        }
-
-        // B. Sprawdzamy wejście z klawiatury (100 ms timeout)
-        int poll_res = poll(&std_pfd, 1, 100);
-        if (poll_res <= 0)
-        {
-            continue;
-        }
-
-        if (!fgets(line, sizeof(line), stdin))
-        {
-            break;
-        }
-
-        line[strcspn(line, "\r\n")] = 0;
-        if (strlen(line) == 0)
-        {
-            continue;
-        }
-
-        if (strcmp(line, "/quit") == 0)
-        {
-            zmq_send(socket_pair_command, "/quit", 5, 0);
-            break;
-        }
-
-        // Wysyłamy komendę do REQ i czekamy na Odpowiedź (ACK/ERR)
-        zmq_send(socket_pair_command, line, strlen(line), 0);
-
-        char response_buf[2048];
-        int  bytes = zmq_recv(socket_pair_command, response_buf, sizeof(response_buf) - 1, 0);
-        if (bytes > 0)
-        {
-            response_buf[bytes] = '\0';
-            printf("%s\n", response_buf);
         }
     }
 
