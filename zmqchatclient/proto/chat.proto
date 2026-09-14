@@ -32,6 +32,12 @@ message LoginResponse {
   string error_message = 3;
 }
 
+// --- HEARTBEAT ---
+message HeartbeatPing {
+  string username = 1;
+  int64 timestamp = 2;
+}
+
 // --- ZARZĄDZANIE POKOJAMI ---
 message JoinRoomRequest {
   string room_name = 1;
@@ -43,7 +49,9 @@ message LeaveRoomRequest {
   string username = 2;
 }
 
-message ListRoomsRequest {}
+message ListRoomsRequest {
+  string username = 1;
+}
 
 message RoomInfo {
   string name = 1;
@@ -99,5 +107,6 @@ message MessageEnvelope {
     DirectMessage direct_msg = 9;
     SystemNotification system_notif = 10;
     GenericAck ack = 11;
+    HeartbeatPing heartbeat = 12;
   }
 }
