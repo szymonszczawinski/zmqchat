@@ -11,5 +11,4 @@ int main(int argc, char** argv)
     zmq_version(&major, &minor, &patch);
     printf("Current 0MQ version is %d.%d.%d\n", major, minor, patch);
     zmq_client_run();
-    // zmq_client_reactive_run();
 }
