@@ -3,6 +3,7 @@
 
 #include "client/chat_client_socket.h"
 #include "generated/chat.pb-c.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,73 +19,93 @@
 
 // Helper wysyłający i odbierający na REQ
 static Api__Chat__MessageEnvelope* send_and_recv_env(socket_req_t*               socket_req_chat,
-                                                     Api__Chat__MessageEnvelope* envelope);
+                                                     Api__Chat__MessageEnvelope* envelope,
+                                                     socket_push_t*              socket_push_logs);
 
 static int handle_message_ui(socket_req_t*  socket_req_chat,
                              socket_pair_t* socket_pair_receiver_ctrl,
                              socket_pair_t* socket_pair_ui_command,
-                             char*          username);
+                             char*          username,
+                             socket_push_t* socket_push_logs);
 
-static int handle_room_list(socket_req_t* socket_req_chat, socket_pair_t* socket_pair_ui_command);
+static int handle_room_list(socket_req_t*  socket_req_chat,
+                            socket_pair_t* socket_pair_ui_command,
+                            socket_push_t* socket_push_logs);
 
 static int handle_room_join(socket_req_t*  socket_req_chat,
                             socket_pair_t* socket_pair_receiver_ctrl,
                             socket_pair_t* socket_pair_ui_command,
                             char*          line,
-                            char*          username);
+                            char*          username,
+                            socket_push_t* socket_push_logs);
 
 static int handle_room_leave(socket_req_t*  socket_req_chat,
                              socket_pair_t* socket_pair_receiver_ctrl,
                              socket_pair_t* socket_pair_ui_command,
                              char*          line,
-                             char*          username);
+                             char*          username,
+                             socket_push_t* socket_push_logs);
 
 static int handle_message_room(socket_req_t*  socket_req_chat,
                                socket_pair_t* socket_pair_ui_command,
                                char*          line,
-                               char*          username);
+                               char*          username,
+                               socket_push_t* socket_push_logs);
 
 static int handle_message_direct(socket_req_t*  socket_req_chat,
                                  socket_pair_t* socket_pair_ui_command,
                                  char*          line,
-                                 char*          username);
+                                 char*          username,
+                                 socket_push_t* socket_push_logs);
 
 static void clean_up(socket_sub_t*  socket_sub_shutdown,
                      socket_req_t*  socket_req_chat,
                      socket_pair_t* socket_pair_receiver_ctrl,
                      socket_pair_t* socket_pair_ui_command);
 
-static int handle_shutdown_message(socket_sub_t* socket_sub_shutdown);
+static int handle_shutdown_message(socket_sub_t* socket_sub_shutdown, socket_push_t* socket_push_logs);
 
-static int send_ping_message(socket_req_t* socket_req_chat, char* username);
+static int send_ping_message(socket_req_t* socket_req_chat, char* username, socket_push_t* socket_push_logs);
 
-static int logout(socket_req_t* socket_req_chat, char* username);
+static int logout(socket_req_t* socket_req_chat, char* username, socket_push_t* socket_push_logs);
 
 static int send_login_request(socket_sub_t*  socket_sub_shutdown,
                               socket_req_t*  socket_req_chat,
                               socket_pair_t* socket_pair_receiver_ctrl,
                               socket_pair_t* socket_pair_ui_command,
-                              char*          username);
+                              char*          username,
+                              socket_push_t* socket_push_logs);
+
+static void log_app(socket_push_t* socket_push_logs, const char* format, ...);
 
 void* routine_chat_controller(void* arg)
 {
-    printf("[ZMQClient][controller thread] start socket_req_chat_routine\n");
-
     ControllerArgs* args     = (ControllerArgs*)arg;
     void*           context  = args->context;
     char*           username = args->username;
+
+    socket_push_t* socket_push_logs = socket_push_new(context);
+    if (socket_push_connect(socket_push_logs, APP_LOGS_ADDRESS) != 0)
+    {
+        perror("[ZMQClient][controller thread] connect inproc://app_log error");
+        socket_push_destroy(&socket_push_logs);
+        return NULL;
+    }
+    log_app(socket_push_logs, "[ZMQClient][controller thread] start socket_req_chat_routine\n");
 
     // Control socket INPROC (SUB for kill/stop signal)
     socket_sub_t* socket_sub_shutdown = socket_sub_new(context);
     if (socket_sub_connect(socket_sub_shutdown, INPROC_SHUTDOWN_ADDR) == -1)
     {
-        printf("[ZMQClient][controller thread] shutdown socket connect failed: %s\n", strerror(errno));
+        log_app(
+            socket_push_logs, "[ZMQClient][controller thread] shutdown socket connect failed: %s\n", strerror(errno));
         clean_up(socket_sub_shutdown, NULL, NULL, NULL);
         return NULL;
     }
     if (socket_sub_subscribe(socket_sub_shutdown, "") != 0)
     {
-        printf("[ZMQClient][controller thread] shutdown socket subscribe failed: %s\n", strerror(errno));
+        log_app(
+            socket_push_logs, "[ZMQClient][controller thread] shutdown socket subscribe failed: %s\n", strerror(errno));
         clean_up(socket_sub_shutdown, NULL, NULL, NULL);
         return NULL;
     }
@@ -92,7 +113,7 @@ void* routine_chat_controller(void* arg)
     socket_req_t* socket_req_chat = socket_req_new(context);
     if (socket_req_connect(socket_req_chat, CHAT_SERVER_REQ_ADDRESS) != 0)
     {
-        perror("[ZMQClient][controller thread] REQ connection error");
+        log_app(socket_push_logs, "[ZMQClient][controller thread] REQ connection error");
         clean_up(socket_sub_shutdown, socket_req_chat, NULL, NULL);
         return NULL;
     }
@@ -101,7 +122,7 @@ void* routine_chat_controller(void* arg)
     socket_pair_t* socket_pair_receiver_ctrl = socket_pair_new(context);
     if (socket_pair_bind(socket_pair_receiver_ctrl, CONTROLLER_RECEIVER_COMMAND_ADDRESS) != 0)
     {
-        perror("[ZMQClient][controller thread] bind inproc://receiver-control error");
+        log_app(socket_push_logs, "[ZMQClient][controller thread] bind inproc://receiver-control error");
         clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, NULL);
         return NULL;
     }
@@ -110,29 +131,33 @@ void* routine_chat_controller(void* arg)
     socket_pair_t* socket_pair_ui_command = socket_pair_new(context);
     if (socket_pair_bind(socket_pair_ui_command, CONROLLER_UI_COMMAND_ADDRESS) != 0)
     {
-        perror("[ZMQClient][controller thread] bind inproc://command-socket error");
+        log_app(socket_push_logs, "[ZMQClient][controller thread] bind inproc://command-socket error");
         clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command);
         return NULL;
     }
 
     //  auto login on start
-    if (send_login_request(
-            socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, username)
+    if (send_login_request(socket_sub_shutdown,
+                           socket_req_chat,
+                           socket_pair_receiver_ctrl,
+                           socket_pair_ui_command,
+                           username,
+                           socket_push_logs)
         < 0)
     {
         return NULL;
     }
-    printf("[ZMQClient][controller thread] login success as '%s'!\n", username);
+    log_app(socket_push_logs, "[ZMQClient][controller thread] login success as '%s'!\n", username);
 
     zmq_pollitem_t items[] = { { socket_sub_get_raw(socket_sub_shutdown), 0, ZMQ_POLLIN, 0 },
                                { socket_pair_get_raw(socket_pair_ui_command), 0, ZMQ_POLLIN, 0 } };
 
     //  main loop handling shutdown, messages from UI and heartbeat
-    printf("[ZMQClient][controller thread] loop start!\n");
+    log_app(socket_push_logs, "[ZMQClient][controller thread] loop start!\n");
     while (1)
     {
         // Wątek bezpiecznie "śpi", czekając na jedno z dwóch zdarzeń
-        printf("[ZMQClient][controller thread] waiting...\n");
+        log_app(socket_push_logs, "[ZMQClient][controller thread] waiting...\n");
         int rc = zmq_poll(items, 2, 2000);
         if (rc < 0)
         {
@@ -140,14 +165,14 @@ void* routine_chat_controller(void* arg)
             {
                 continue;  // Przerwanie sygnałem systemowym - ponawiamy poll
             }
-            perror("[ZMQClient][controller thread] zmq_poll error");
+            log_app(socket_push_logs, "[ZMQClient][controller thread] zmq_poll error");
             break;
         }
 
         // --- handle SHUTDOWN ("KILL") ---
         if (items[0].revents & ZMQ_POLLIN)
         {
-            if (handle_shutdown_message(socket_sub_shutdown) < 0)
+            if (handle_shutdown_message(socket_sub_shutdown, socket_push_logs) < 0)
             {
                 break;
             }
@@ -155,7 +180,9 @@ void* routine_chat_controller(void* arg)
         // --- handle command from UI (ZMQ_PAIR) ---
         if (items[1].revents & ZMQ_POLLIN)
         {
-            if (handle_message_ui(socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, username) < 0)
+            if (handle_message_ui(
+                    socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, username, socket_push_logs)
+                < 0)
             {
                 break;
             }
@@ -163,18 +190,21 @@ void* routine_chat_controller(void* arg)
         else if (rc == 0)
         {
             // --- TIMEOUT (2s) -> send PING ---
-            send_ping_message(socket_req_chat, username);
+            send_ping_message(socket_req_chat, username, socket_push_logs);
         }
     }
 
-    logout(socket_req_chat, username);
+    logout(socket_req_chat, username, socket_push_logs);
 
     clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command);
-    printf("[ZMQClient][controller thread] exit\n");
+    log_app(socket_push_logs, "[ZMQClient][controller thread] exit\n");
+    socket_push_destroy(&socket_push_logs);
     return NULL;
 }
 
-static int handle_room_list(socket_req_t* socket_req_chat, socket_pair_t* socket_pair_ui_command)
+static int handle_room_list(socket_req_t*  socket_req_chat,
+                            socket_pair_t* socket_pair_ui_command,
+                            socket_push_t* socket_push_logs)
 {
     Api__Chat__ListRoomsRequest room_list_req     = API__CHAT__LIST_ROOMS_REQUEST__INIT;
     Api__Chat__MessageEnvelope  room_list_req_env = API__CHAT__MESSAGE_ENVELOPE__INIT;
@@ -182,9 +212,10 @@ static int handle_room_list(socket_req_t* socket_req_chat, socket_pair_t* socket
     room_list_req_env.payload_case                = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LIST_ROOMS_REQ;
     room_list_req_env.list_rooms_req              = &room_list_req;
 
-    printf("[ZMQClient][controller thread] sending room list request\n");
-    Api__Chat__MessageEnvelope* room_list_res_env = send_and_recv_env(socket_req_chat, &room_list_req_env);
-    printf("[ZMQClient][controller thread] received room list response\n");
+    log_app(socket_push_logs, "[ZMQClient][controller thread] sending room list request\n");
+    Api__Chat__MessageEnvelope* room_list_res_env
+        = send_and_recv_env(socket_req_chat, &room_list_req_env, socket_push_logs);
+    log_app(socket_push_logs, "[ZMQClient][controller thread] received room list response\n");
 
     char out_buf[1024] = "could not get rooms list";
     if (room_list_res_env)
@@ -193,8 +224,9 @@ static int handle_room_list(socket_req_t* socket_req_chat, socket_pair_t* socket
         {
             int offset = snprintf(
                 out_buf, sizeof(out_buf), "--- Lista Pokojów (%zu) ---\n", room_list_res_env->list_rooms_resp->n_rooms);
-            printf("[ZMQClient][controller thread] received rooms number: %zu\n",
-                   room_list_res_env->list_rooms_resp->n_rooms);
+            log_app(socket_push_logs,
+                    "[ZMQClient][controller thread] received rooms number: %zu\n",
+                    room_list_res_env->list_rooms_resp->n_rooms);
             for (size_t i = 0; i < room_list_res_env->list_rooms_resp->n_rooms; i++)
             {
                 Api__Chat__RoomInfo* r = room_list_res_env->list_rooms_resp->rooms[i];
@@ -206,7 +238,7 @@ static int handle_room_list(socket_req_t* socket_req_chat, socket_pair_t* socket
             }
         }
 
-        printf("[ZMQClient][controller thread] forward room list to UI: %s\n", out_buf);
+        log_app(socket_push_logs, "[ZMQClient][controller thread] forward room list to UI: %s\n", out_buf);
         socket_pair_send(socket_pair_ui_command, out_buf, strlen(out_buf), 0);
 
         api__chat__message_envelope__free_unpacked(room_list_res_env, NULL);
@@ -214,8 +246,9 @@ static int handle_room_list(socket_req_t* socket_req_chat, socket_pair_t* socket
     }
     else
     {
-        printf("[ZMQClient][controller thread][handle_rooms_request][REQ][CHAT] error sending message : %s\n",
-               strerror(errno));
+        log_app(socket_push_logs,
+                "[ZMQClient][controller thread][handle_rooms_request][REQ][CHAT] error sending message : %s\n",
+                strerror(errno));
         return ERROR_ZMQ_REQ_SEND;
     }
 }
@@ -224,7 +257,8 @@ static int handle_room_join(socket_req_t*  socket_req_chat,
                             socket_pair_t* socket_pair_receiver_ctrl,
                             socket_pair_t* socket_pair_ui_command,
                             char*          line,
-                            char*          username)
+                            char*          username,
+                            socket_push_t* socket_push_logs)
 {
     char* room_name = line + 6;
 
@@ -237,7 +271,7 @@ static int handle_room_join(socket_req_t*  socket_req_chat,
     req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_JOIN_ROOM_REQ;
     req_env.join_room_req              = &join_req;
 
-    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
+    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env, socket_push_logs);
     if (res_env)
     {
 
@@ -252,18 +286,20 @@ static int handle_room_join(socket_req_t*  socket_req_chat,
             if (socket_pair_send(socket_pair_receiver_ctrl, ctrl_cmd, strlen(ctrl_cmd), 0) < 0)
             {
 
-                printf("[ZMQClient][controller thread][handle_room_join_request][PAIR][receiver] error sending "
-                       "message: %s\n",
-                       strerror(errno));
+                log_app(socket_push_logs,
+                        "[ZMQClient][controller thread][handle_room_join_request][PAIR][receiver] error sending "
+                        "message: %s\n",
+                        strerror(errno));
             }
         }
 
         if (socket_pair_send(socket_pair_ui_command, out_buf, strlen(out_buf), 0) < 0)
         {
 
-            printf("[ZMQClient][controller thread][handle_room_join_request][PAIR][ui] error sending "
-                   "message: %s\n",
-                   strerror(errno));
+            log_app(socket_push_logs,
+                    "[ZMQClient][controller thread][handle_room_join_request][PAIR][ui] error sending "
+                    "message: %s\n",
+                    strerror(errno));
         }
 
         api__chat__message_envelope__free_unpacked(res_env, NULL);
@@ -271,14 +307,16 @@ static int handle_room_join(socket_req_t*  socket_req_chat,
     }
     else
     {
-        printf("[ZMQClient][controller thread][handle_room_join_request][REQ][CHAT] error sending message : %s\n",
-               strerror(errno));
+        log_app(socket_push_logs,
+                "[ZMQClient][controller thread][handle_room_join_request][REQ][CHAT] error sending message : %s\n",
+                strerror(errno));
         return ERROR_ZMQ_REQ_SEND;
     }
 }
 
 static Api__Chat__MessageEnvelope* send_and_recv_env(socket_req_t*               socket_req_chat,
-                                                     Api__Chat__MessageEnvelope* envelope)
+                                                     Api__Chat__MessageEnvelope* envelope,
+                                                     socket_push_t*              socket_push_logs)
 {
     size_t   envelope_packed_size = api__chat__message_envelope__get_packed_size(envelope);
     uint8_t* envelope_buffer      = malloc(envelope_packed_size);
@@ -289,7 +327,9 @@ static Api__Chat__MessageEnvelope* send_and_recv_env(socket_req_t*              
 
     if (rc < 0)
     {
-        printf("[ZMQClient][controller thread][send_and_recv_env] error sending message: %s\n", strerror(errno));
+        log_app(socket_push_logs,
+                "[ZMQClient][controller thread][send_and_recv_env] error sending message: %s\n",
+                strerror(errno));
         return NULL;
     }
 
@@ -297,7 +337,9 @@ static Api__Chat__MessageEnvelope* send_and_recv_env(socket_req_t*              
     int     received_bytes_number = socket_req_recv(socket_req_chat, received_buffer, sizeof(received_buffer), 0);
     if (received_bytes_number < 0)
     {
-        printf("[ZMQClient][controller thread][send_and_recv_env] error receiving message: %s\n", strerror(errno));
+        log_app(socket_push_logs,
+                "[ZMQClient][controller thread][send_and_recv_env] error receiving message: %s\n",
+                strerror(errno));
         return NULL;
     }
 
@@ -308,7 +350,8 @@ static int handle_room_leave(socket_req_t*  socket_req_chat,
                              socket_pair_t* socket_pair_receiver_ctrl,
                              socket_pair_t* socket_pair_ui_command,
                              char*          line,
-                             char*          username)
+                             char*          username,
+                             socket_push_t* socket_push_logs)
 {
     char* room_name = line + 7;
 
@@ -321,7 +364,7 @@ static int handle_room_leave(socket_req_t*  socket_req_chat,
     req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LEAVE_ROOM_REQ;
     req_env.leave_room_req             = &leave_req;
 
-    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
+    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env, socket_push_logs);
 
     char out_buf[256] = "error leaving room";
     if (res_env)
@@ -342,8 +385,9 @@ static int handle_room_leave(socket_req_t*  socket_req_chat,
     }
     else
     {
-        printf("[ZMQClient][controller thread][handle_room_leave_request] error sending message: %s\n",
-               strerror(errno));
+        log_app(socket_push_logs,
+                "[ZMQClient][controller thread][handle_room_leave_request] error sending message: %s\n",
+                strerror(errno));
         return ERROR_ZMQ_REQ_SEND;
     }
 }
@@ -351,7 +395,8 @@ static int handle_room_leave(socket_req_t*  socket_req_chat,
 static int handle_message_room(socket_req_t*  socket_req_chat,
                                socket_pair_t* socket_pair_ui_command,
                                char*          line,
-                               char*          username)
+                               char*          username,
+                               socket_push_t* socket_push_logs)
 {
     char* room_name = strtok(line + 5, " ");
     char* content   = strtok(NULL, "");
@@ -368,16 +413,17 @@ static int handle_message_room(socket_req_t*  socket_req_chat,
         req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ROOM_MSG;
         req_env.room_msg                   = &rmsg;
 
-        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
+        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env, socket_push_logs);
         if (res_env)
         {
-            socket_pair_send(socket_pair_ui_command, "[ACK] Wiadomość wysłana", 22, 0);
+            socket_pair_send(socket_pair_ui_command, CHAT_MESSAGE_SEND_ACK, strlen(CHAT_MESSAGE_SEND_ACK), 0);
             api__chat__message_envelope__free_unpacked(res_env, NULL);
         }
         else
         {
-            printf("[ZMQClient][controller thread][handle_message_room_request] error sending message: %s\n",
-                   strerror(errno));
+            log_app(socket_push_logs,
+                    "[ZMQClient][controller thread][handle_message_room_request] error sending message: %s\n",
+                    strerror(errno));
             socket_pair_send(socket_pair_ui_command, "[ERR] Błąd wysyłania wiadomości", 31, 0);
         }
     }
@@ -391,7 +437,8 @@ static int handle_message_room(socket_req_t*  socket_req_chat,
 static int handle_message_direct(socket_req_t*  socket_req_chat,
                                  socket_pair_t* socket_pair_ui_command,
                                  char*          line,
-                                 char*          username)
+                                 char*          username,
+                                 socket_push_t* socket_push_logs)
 {
     char* target  = strtok(line + 4, " ");
     char* content = strtok(NULL, "");
@@ -408,7 +455,7 @@ static int handle_message_direct(socket_req_t*  socket_req_chat,
         req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_DIRECT_MSG;
         req_env.direct_msg                 = &dm;
 
-        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env);
+        Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &req_env, socket_push_logs);
         if (res_env)
         {
             socket_pair_send(socket_pair_ui_command, "[ACK] Wiadomość prywatna wysłana", 32, 0);
@@ -416,8 +463,9 @@ static int handle_message_direct(socket_req_t*  socket_req_chat,
         }
         else
         {
-            printf("[ZMQClient][controller thread][handle_message_direct_request] error sending message: %s\n",
-                   strerror(errno));
+            log_app(socket_push_logs,
+                    "[ZMQClient][controller thread][handle_message_direct_request] error sending message: %s\n",
+                    strerror(errno));
             socket_pair_send(socket_pair_ui_command, "[ERR] Błąd wysyłania DM", 23, 0);
         }
     }
@@ -439,9 +487,9 @@ static void clean_up(socket_sub_t*  socket_sub_shutdown,
     socket_pair_destroy(&socket_pair_receiver_ctrl);
 }
 
-static int logout(socket_req_t* socket_req_chat, char* username)
+static int logout(socket_req_t* socket_req_chat, char* username, socket_push_t* socket_push_logs)
 {
-    printf("[ZMQClient][controller thread] logout\n");
+    log_app(socket_push_logs, "[ZMQClient][controller thread] logout\n");
     Api__Chat__LeaveRoomRequest leave_req = API__CHAT__LEAVE_ROOM_REQUEST__INIT;
     leave_req.room_name                   = CHAT_ROOM_GENERAL;
     leave_req.username                    = username;
@@ -451,37 +499,43 @@ static int logout(socket_req_t* socket_req_chat, char* username)
     leave_req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LEAVE_ROOM_REQ;
     leave_req_env.leave_room_req             = &leave_req;
 
-    Api__Chat__MessageEnvelope* resp_leave = send_and_recv_env(socket_req_chat, &leave_req_env);
+    Api__Chat__MessageEnvelope* resp_leave = send_and_recv_env(socket_req_chat, &leave_req_env, socket_push_logs);
     if (resp_leave)
     {
-        printf("[ZMQClient][controller thread][logout] Server acknowledged leave general.\n");
+        log_app(socket_push_logs, "[ZMQClient][controller thread][logout] Server acknowledged leave general.\n");
         api__chat__message_envelope__free_unpacked(resp_leave, NULL);
         return OK_ZMQ;
     }
     else
     {
-        printf("[ZMQClient][controller thread][logout] error sending message: %s\n", strerror(errno));
+        log_app(
+            socket_push_logs, "[ZMQClient][controller thread][logout] error sending message: %s\n", strerror(errno));
         return ERROR_ZMQ_REQ_SEND;
     }
 }
 
-static int handle_shutdown_message(socket_sub_t* socket_sub_shutdown)
+static int handle_shutdown_message(socket_sub_t* socket_sub_shutdown, socket_push_t* socket_push_logs)
 {
-    char shutdown_msg[10] = { 0 };
+    char shutdown_msg[64] = { 0 };
     int  bytes            = socket_sub_recv(socket_sub_shutdown, shutdown_msg, sizeof(shutdown_msg) - 1, 0);
     if (bytes > 0)
     {
-        shutdown_msg[bytes] = '\0';
-        if (strcmp(shutdown_msg, CHAT_MESSAGE_KILL) == 0)
+        if (bytes >= (int)sizeof(shutdown_msg))
         {
-            printf("[ZMQClient][controller thread] Received KILL signal. Shutting down cleanly...\n");
+            bytes = sizeof(shutdown_msg) - 1;
+        }
+        shutdown_msg[bytes] = '\0';
+        if (strcmp(shutdown_msg, CHAT_MESSAGE_KILL_CONTROLLER) == 0)
+        {
+            log_app(socket_push_logs,
+                    "[ZMQClient][controller thread] received KILL signal. shutting down cleanly...\n");
             return -1;
         }
     }
     return OK_ZMQ;
 }
 
-static int send_ping_message(socket_req_t* socket_req_chat, char* username)
+static int send_ping_message(socket_req_t* socket_req_chat, char* username, socket_push_t* socket_push_logs)
 {
     Api__Chat__HeartbeatPing ping = API__CHAT__HEARTBEAT_PING__INIT;
     ping.username                 = username;
@@ -491,17 +545,17 @@ static int send_ping_message(socket_req_t* socket_req_chat, char* username)
     env_ping.message_id                 = "heartbeat-ping";
     env_ping.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_HEARTBEAT;
     env_ping.heartbeat                  = &ping;
-    printf("[ZMQClient][controller thread][ping] sending...\n");
-    Api__Chat__MessageEnvelope* resp = send_and_recv_env(socket_req_chat, &env_ping);
+    log_app(socket_push_logs, "[ZMQClient][controller thread][ping] sending...\n");
+    Api__Chat__MessageEnvelope* resp = send_and_recv_env(socket_req_chat, &env_ping, socket_push_logs);
     if (resp)
     {
-        printf("[ZMQClient][controller thread][ping] pong received...\n");
+        log_app(socket_push_logs, "[ZMQClient][controller thread][ping] pong received...\n");
         api__chat__message_envelope__free_unpacked(resp, NULL);
         return OK_ZMQ;
     }
     else
     {
-        printf("[ZMQClient][controller thread][ping] error sending message: %s\n", strerror(errno));
+        log_app(socket_push_logs, "[ZMQClient][controller thread][ping] error sending message: %s\n", strerror(errno));
         return ERROR_ZMQ_REQ_SEND;
     }
 }
@@ -509,7 +563,8 @@ static int send_ping_message(socket_req_t* socket_req_chat, char* username)
 static int handle_message_ui(socket_req_t*  socket_req_chat,
                              socket_pair_t* socket_pair_receiver_ctrl,
                              socket_pair_t* socket_pair_ui_command,
-                             char*          username)
+                             char*          username,
+                             socket_push_t* socket_push_logs)
 {
     char cmd_buf[512];
     int  bytes = socket_pair_recv(socket_pair_ui_command, cmd_buf, sizeof(cmd_buf) - 1, 0);
@@ -526,23 +581,25 @@ static int handle_message_ui(socket_req_t*  socket_req_chat,
 
     if (strcmp(cmd_buf, CHAT_COMMAND_ROOMS) == 0)
     {
-        return handle_room_list(socket_req_chat, socket_pair_ui_command);
+        return handle_room_list(socket_req_chat, socket_pair_ui_command, socket_push_logs);
     }
     else if (strncmp(cmd_buf, CHAT_COMMAND_JOIN, 5) == 0)
     {
-        return handle_room_join(socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
+        return handle_room_join(
+            socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username, socket_push_logs);
     }
     else if (strncmp(cmd_buf, CHAT_COMMAND_LEAVE, 6) == 0)
     {
-        return handle_room_leave(socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username);
+        return handle_room_leave(
+            socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, cmd_buf, username, socket_push_logs);
     }
     else if (strncmp(cmd_buf, CHAT_COMMAND_MSG, 4) == 0)
     {
-        return handle_message_room(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
+        return handle_message_room(socket_req_chat, socket_pair_ui_command, cmd_buf, username, socket_push_logs);
     }
     else if (strncmp(cmd_buf, CHAT_COMMAND_DM, 3) == 0)
     {
-        return handle_message_direct(socket_req_chat, socket_pair_ui_command, cmd_buf, username);
+        return handle_message_direct(socket_req_chat, socket_pair_ui_command, cmd_buf, username, socket_push_logs);
     }
     else
     {
@@ -555,7 +612,8 @@ static int send_login_request(socket_sub_t*  socket_sub_shutdown,
                               socket_req_t*  socket_req_chat,
                               socket_pair_t* socket_pair_receiver_ctrl,
                               socket_pair_t* socket_pair_ui_command,
-                              char*          username)
+                              char*          username,
+                              socket_push_t* socket_push_logs)
 {
     Api__Chat__LoginRequest login_req = API__CHAT__LOGIN_REQUEST__INIT;
     login_req.username                = username;
@@ -566,14 +624,29 @@ static int send_login_request(socket_sub_t*  socket_sub_shutdown,
     env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LOGIN_REQ;
     env.login_req                  = &login_req;
 
-    Api__Chat__MessageEnvelope* resp = send_and_recv_env(socket_req_chat, &env);
+    Api__Chat__MessageEnvelope* resp = send_and_recv_env(socket_req_chat, &env, socket_push_logs);
     if (!resp || resp->payload_case != API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LOGIN_RESP
         || resp->login_resp->status != API__CHAT__STATUS__STATUS_OK)
     {
-        printf("[ZMQClient][controller thread][login] login failed!\n");
+        log_app(socket_push_logs, "[ZMQClient][controller thread][login] login failed!\n");
         clean_up(socket_sub_shutdown, socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command);
         return ERROR_ZMQ_REQ_SEND;
     }
     api__chat__message_envelope__free_unpacked(resp, NULL);
     return OK_ZMQ;
+}
+
+static void log_app(socket_push_t* socket_push_logs, const char* format, ...)
+{
+    char    body[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(body, sizeof(body), format, args);
+    va_end(args);
+
+    char full_log[1100];
+    snprintf(full_log, sizeof(full_log), "%s", body);
+
+    // Wysyłamy log przez PUB (nieblokująco)
+    socket_push_send(socket_push_logs, full_log, strlen(full_log), ZMQ_DONTWAIT);
 }

@@ -3,6 +3,7 @@
 
 #include "client/chat_client_socket.h"
 #include "generated/chat.pb-c.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,31 +11,45 @@
 #include <pthread.h>
 #include <zmq.h>
 
+#define OK_ZMQ 0
 static void handle_chat_message(socket_sub_t* socket_sub_chat, socket_pair_t* socket_pair_ui_notification);
-static void handle_command(socket_pair_t* socket_pair_controller_command, socket_sub_t* socket_sub_chat);
+static void handle_command(socket_pair_t* socket_pair_controller_command,
+                           socket_sub_t*  socket_sub_chat,
+                           socket_push_t* socket_push_logs);
 
 static void clean_up(socket_sub_t*  socket_sub_shutdown,
                      socket_sub_t*  socket_sub_chat,
                      socket_pair_t* socket_pair_controller_command,
                      socket_pair_t* socket_pair_ui_notification);
 
+static void log_app(socket_push_t* socket_push_logs, const char* format, ...);
+
+static int handle_shutdown_message(socket_sub_t* socket_sub_shutdown, socket_push_t* socket_push_logs);
+
 void* routine_chat_receiver(void* arg)
 {
-    printf("[ZMQClient][receiver thread] start subscriber_routine\n");
     ReceiverArgs* args    = (ReceiverArgs*)arg;
     void*         context = args->context;
 
+    socket_push_t* socket_push_logs = socket_push_new(context);
+    if (socket_push_connect(socket_push_logs, APP_LOGS_ADDRESS) != 0)
+    {
+        perror("[ZMQClient][controller thread] connect inproc://app_log error");
+        socket_push_destroy(&socket_push_logs);
+        return NULL;
+    }
+    log_app(socket_push_logs, "[ZMQClient][receiver thread] start subscriber_routine\n");
     // Control socket INPROC (SUB for kill/stop signal)
     socket_sub_t* socket_sub_shutdown = socket_sub_new(context);
     if (socket_sub_connect(socket_sub_shutdown, INPROC_SHUTDOWN_ADDR) == -1)
     {
-        printf("[ZMQClient][receiver thread] shutdown socket connect failed: %s\n", strerror(errno));
+        log_app(socket_push_logs, "[ZMQClient][receiver thread] shutdown socket connect failed: %s\n", strerror(errno));
         clean_up(socket_sub_shutdown, NULL, NULL, NULL);
         return NULL;
     }
     if (socket_sub_subscribe(socket_sub_shutdown, "") != 0)
     {
-        printf("[ZMQClient][UI Thread] shutdown socket subscribe failed: %s\n", strerror(errno));
+        log_app(socket_push_logs, "[ZMQClient][UI Thread] shutdown socket subscribe failed: %s\n", strerror(errno));
         clean_up(socket_sub_shutdown, NULL, NULL, NULL);
         return NULL;
     }
@@ -43,7 +58,7 @@ void* routine_chat_receiver(void* arg)
     socket_sub_t* socket_sub_chat = socket_sub_new(context);
     if (socket_sub_connect(socket_sub_chat, CHAT_SERVER_SUB_ADDRESS) != 0)
     {
-        perror("[ZMQClient][receiver thread] Błąd połączenia z PUB");
+        log_app(socket_push_logs, "[ZMQClient][receiver thread] Błąd połączenia z PUB");
         clean_up(socket_sub_shutdown, socket_sub_chat, NULL, NULL);
         return NULL;
     }
@@ -52,7 +67,7 @@ void* routine_chat_receiver(void* arg)
     socket_pair_t* socket_pair_controller_command = socket_pair_new(context);
     if (socket_pair_connect(socket_pair_controller_command, CONTROLLER_RECEIVER_COMMAND_ADDRESS) != 0)
     {
-        perror("[receiver thread] Błąd połączenia z CONTROLLER_RECEIVER_COMMAND_ADDRESS");
+        log_app(socket_push_logs, "[receiver thread] Błąd połączenia z CONTROLLER_RECEIVER_COMMAND_ADDRESS");
         clean_up(socket_sub_shutdown, socket_sub_chat, socket_pair_controller_command, NULL);
         return NULL;
     }
@@ -61,7 +76,7 @@ void* routine_chat_receiver(void* arg)
     socket_pair_t* socket_pair_ui_notification = socket_pair_new(context);
     if (socket_pair_connect(socket_pair_ui_notification, CONTROLLER_UI_NOTIFICATION_ADDRESS) != 0)
     {
-        perror("[receiver thread] Błąd połączenia z UI_NOTIF_ADDRESS");
+        log_app(socket_push_logs, "[receiver thread] Błąd połączenia z UI_NOTIF_ADDRESS");
         clean_up(socket_sub_shutdown, socket_sub_chat, socket_pair_controller_command, socket_pair_ui_notification);
         return NULL;
     }
@@ -80,10 +95,10 @@ void* routine_chat_receiver(void* arg)
         // 2: Komendy sterujące z REQ (inproc)
     };
 
-    printf("[ZMQClient][receiver thread] loop start!\n");
+    log_app(socket_push_logs, "[ZMQClient][receiver thread] loop start!\n");
     while (1)
     {
-        printf("[ZMQClient][receiver thread] waiting...\n");
+        log_app(socket_push_logs, "[ZMQClient][receiver thread] waiting...\n");
         int rc = zmq_poll(items, 3, -1);
         if (rc < 0)
         {
@@ -91,16 +106,9 @@ void* routine_chat_receiver(void* arg)
         }
         if (items[0].revents & ZMQ_POLLIN)
         {
-            char shutdown_msg[10] = { 0 };
-            int  bytes            = socket_sub_recv(socket_sub_shutdown, shutdown_msg, sizeof(shutdown_msg) - 1, 0);
-            if (bytes > 0)
+            if (handle_shutdown_message(socket_sub_shutdown, socket_push_logs) < 0)
             {
-                shutdown_msg[bytes] = '\0';
-                if (strcmp(shutdown_msg, CHAT_MESSAGE_KILL) == 0)
-                {
-                    printf("[ZMQClient][receiver thread] Received KILL signal. Shutting down cleanly...\n");
-                    break;
-                }
+                break;
             }
         }
         if (items[1].revents & ZMQ_POLLIN)
@@ -110,11 +118,12 @@ void* routine_chat_receiver(void* arg)
 
         if (items[2].revents & ZMQ_POLLIN)
         {
-            handle_command(socket_pair_controller_command, socket_sub_chat);
+            handle_command(socket_pair_controller_command, socket_sub_chat, socket_push_logs);
         }
     }
     clean_up(socket_sub_shutdown, socket_sub_chat, socket_pair_controller_command, socket_pair_ui_notification);
-    printf("[ZMQClient][receiver thread] exit\n");
+    log_app(socket_push_logs, "[ZMQClient][receiver thread] exit\n");
+    socket_push_destroy(&socket_push_logs);
     return NULL;
 }
 
@@ -177,9 +186,11 @@ static void handle_chat_message(socket_sub_t* socket_sub_chat, socket_pair_t* so
     api__chat__message_envelope__free_unpacked(envelope, NULL);
 }
 
-static void handle_command(socket_pair_t* socket_pair_controller_command, socket_sub_t* socket_sub_chat)
+static void handle_command(socket_pair_t* socket_pair_controller_command,
+                           socket_sub_t*  socket_sub_chat,
+                           socket_push_t* socket_push_logs)
 {
-    printf("[ZMQClient][receiver thread] handle_command\n");
+    log_app(socket_push_logs, "[ZMQClient][receiver thread] handle_command\n");
     char ctrl_buf[256];
     int  len = socket_pair_recv(socket_pair_controller_command, ctrl_buf, sizeof(ctrl_buf) - 1, 0);
     if (len > 0)
@@ -209,4 +220,39 @@ static void clean_up(socket_sub_t*  socket_sub_shutdown,
     socket_sub_destroy(&socket_sub_chat);
     socket_pair_destroy(&socket_pair_controller_command);
     socket_pair_destroy(&socket_pair_ui_notification);
+}
+
+static void log_app(socket_push_t* socket_push_logs, const char* format, ...)
+{
+    char    body[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(body, sizeof(body), format, args);
+    va_end(args);
+
+    char full_log[1100];
+    snprintf(full_log, sizeof(full_log), "%s", body);
+
+    // Wysyłamy log przez PUB (nieblokująco)
+    socket_push_send(socket_push_logs, full_log, strlen(full_log), ZMQ_DONTWAIT);
+}
+
+static int handle_shutdown_message(socket_sub_t* socket_sub_shutdown, socket_push_t* socket_push_logs)
+{
+    char shutdown_msg[64] = { 0 };
+    int  bytes            = socket_sub_recv(socket_sub_shutdown, shutdown_msg, sizeof(shutdown_msg) - 1, 0);
+    if (bytes > 0)
+    {
+        if (bytes >= (int)sizeof(shutdown_msg))
+        {
+            bytes = sizeof(shutdown_msg) - 1;
+        }
+        shutdown_msg[bytes] = '\0';
+        if (strcmp(shutdown_msg, CHAT_MESSAGE_KILL_CONTROLLER) == 0)
+        {
+            log_app(socket_push_logs, "[ZMQClient][receiver thread] received KILL signal. shutting down cleanly...\n");
+            return -1;
+        }
+    }
+    return OK_ZMQ;
 }
