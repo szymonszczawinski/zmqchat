@@ -1,7 +1,6 @@
 #include "chat_client_receiver.h"
 #include "chat_client_common.h"
-
-#include "client/chat_client_socket.h"
+#include "utils/chat_client_socket.h"
 #include "generated/chat.pb-c.h"
 #include <stdarg.h>
 #include <stdio.h>
