@@ -79,4 +79,9 @@ int            socket_pull_connect(socket_pull_t* pull, const char* endpoint);
 int            socket_pull_send(socket_pull_t* pull, const void* buf, size_t len, int flags);
 int            socket_pull_recv(socket_pull_t* pull, void* buf, size_t len, int flags);
 
+char*    recv_frame_as_string(void* socket, int* out_more);
+int      send_frame_string(void* socket, const char* str, int flags);
+uint8_t* recv_frame_bytes(void* socket, size_t* out_size, int* out_more);
+int      send_frame_bytes(void* socket, const uint8_t* data, size_t len, int flags);
+
 #endif  // !CHAT_CLIENT_SOCKET_H

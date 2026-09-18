@@ -267,3 +267,140 @@ void socket_destroy_helper(void* raw_socket)
         zmq_close(raw_socket);
     }
 }
+
+/**
+ * @brief Receives a single ZeroMQ message frame and converts it to a null-terminated string.
+ *
+ * This function allocates memory for the resulting string using malloc().
+ * The caller is strictly responsible for freeing the returned pointer using free()
+ * to prevent memory leaks.
+ *
+ * @param[in]  socket   Pointer to the ZeroMQ socket.
+ * @param[out] out_more Optional pointer to an integer. Set to 1 if there are more
+ *                      frames to follow in a multipart message, or 0 otherwise.
+ *                      Pass NULL if not needed.
+ *
+ * @return A dynamically allocated null-terminated string containing the frame data,
+ *         or NULL if the reception failed.
+ */
+char* recv_frame_as_string(void* socket, int* out_more)
+{
+    zmq_msg_t msg;
+    zmq_msg_init(&msg);
+
+    if (zmq_msg_recv(&msg, socket, 0) == -1)
+    {
+        zmq_msg_close(&msg);
+        return NULL;
+    }
+
+    size_t size = zmq_msg_size(&msg);
+    char*  str  = malloc(size + 1);
+    memcpy(str, zmq_msg_data(&msg), size);
+    str[size] = '\0';
+
+    if (out_more)
+    {
+        *out_more = zmq_msg_more(&msg);
+    }
+
+    zmq_msg_close(&msg);
+    return str;
+}
+
+/**
+ * @brief Sends a null-terminated string as a ZeroMQ message frame.
+ *
+ * This function creates a ZeroMQ message from the provided string, sends it
+ * through the specified socket, and automatically cleans up its internal message resources.
+ *
+ * @param[in] socket Pointer to the ZeroMQ socket.
+ * @param[in] str    The null-terminated string to be sent. Must not be NULL.
+ * @param[in] flags  ZeroMQ message flags (e.g., ZMQ_DONTWAIT, ZMQ_SNDMORE).
+ *
+ * @return The number of bytes sent on success, or -1 if the operation failed.
+ */
+int send_frame_string(void* socket, const char* str, int flags)
+{
+    zmq_msg_t msg;
+    size_t    len = strlen(str);
+    zmq_msg_init_size(&msg, len);
+    memcpy(zmq_msg_data(&msg), str, len);
+
+    int rc = zmq_msg_send(&msg, socket, flags);
+    zmq_msg_close(&msg);
+    return rc;
+}
+
+/**
+ * @brief Receives a binary frame from a ZeroMQ socket.
+ *
+ * Allocates a memory buffer for the incoming message and copies its binary payload.
+ *
+ * @param socket Pointer to the ZeroMQ socket.
+ * @param out_size Pointer to store the size of the received buffer in bytes (optional, can be NULL).
+ * @param out_more Pointer to store the ZMQ_MORE flag state (optional, can be NULL).
+ * @return Pointer to the allocated byte array, or NULL on failure.
+ */
+uint8_t* recv_frame_bytes(void* socket, size_t* out_size, int* out_more)
+{
+    zmq_msg_t msg;
+    zmq_msg_init(&msg);
+
+    if (zmq_msg_recv(&msg, socket, 0) == -1)
+    {
+        zmq_msg_close(&msg);
+        if (out_size)
+            *out_size = 0;
+        return NULL;
+    }
+
+    size_t   size   = zmq_msg_size(&msg);
+    uint8_t* buffer = (uint8_t*)malloc(size);
+    if (!buffer)
+    {
+        zmq_msg_close(&msg);
+        if (out_size)
+            *out_size = 0;
+        return NULL;
+    }
+
+    memcpy(buffer, zmq_msg_data(&msg), size);
+
+    if (out_size)
+    {
+        *out_size = size;
+    }
+
+    if (out_more)
+    {
+        *out_more = zmq_msg_more(&msg);
+    }
+
+    zmq_msg_close(&msg);
+    return buffer;
+}
+
+/**
+ * @brief Sends a binary frame over a ZeroMQ socket.
+ *
+ * @param socket Pointer to the ZeroMQ socket.
+ * @param data Pointer to the buffer containing binary data to send.
+ * @param len Size of the binary data in bytes.
+ * @param flags ZeroMQ send flags (e.g., ZMQ_SNDMORE or 0).
+ * @return Number of bytes sent, or -1 on error.
+ */
+int send_frame_bytes(void* socket, const uint8_t* data, size_t len, int flags)
+{
+    zmq_msg_t msg;
+    if (zmq_msg_init_size(&msg, len) != 0)
+    {
+        return -1;
+    }
+
+    memcpy(zmq_msg_data(&msg), data, len);
+
+    int rc = zmq_msg_send(&msg, socket, flags);
+    zmq_msg_close(&msg);
+    return rc;
+}
