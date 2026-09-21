@@ -39,7 +39,7 @@ func (s *ZmqSocket) Close() {
 	}
 }
 
-// RecvEnvelope odbiera bajty i deserializuje je do MessageEnvelope
+// RecvEnvelope receives bytes and deserializes MessageEnvelope
 func (s *ZmqSocket) RecvEnvelope() (*chat.MessageEnvelope, error) {
 	msgBytes, err := s.sock.RecvBytes(0)
 	if err != nil {
@@ -54,7 +54,7 @@ func (s *ZmqSocket) RecvEnvelope() (*chat.MessageEnvelope, error) {
 	return &env, nil
 }
 
-// SendEnvelope serializuje i wysyła MessageEnvelope (np. dla REQ/REP)
+// SendEnvelope serializes and sends MessageEnvelope
 func (s *ZmqSocket) SendEnvelope(env *chat.MessageEnvelope) error {
 	outBytes, err := proto.Marshal(env)
 	if err != nil {
@@ -65,7 +65,7 @@ func (s *ZmqSocket) SendEnvelope(env *chat.MessageEnvelope) error {
 	return err
 }
 
-// PublishTopicEnvelope wysyła wieloczęściową wiadomość PUB (Topic + Protobuf)
+// PublishTopicEnvelope sends multipart PUB message (Topic + Protobuf)
 func (s *ZmqSocket) PublishTopicEnvelope(topic string, env *chat.MessageEnvelope) error {
 	outBytes, err := proto.Marshal(env)
 	if err != nil {

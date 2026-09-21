@@ -23,29 +23,34 @@ func NewSessionManager() *SessionManager {
 	}
 }
 
-func (sm *SessionManager) CreateSession(username string) string {
+// CreateSession creates new session for given username
+func (sm *SessionManager) CreateSession(username string) (string, error) {
+	if username == "" {
+		return "", ErrorIncorrectUsername
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	token := fmt.Sprintf("token-%s-%d", username, time.Now().Unix())
 	sm.users[token] = username
-	return token
+	return token, nil
 }
 
 // TouchUser update last user activity
-func (sm *SessionManager) TouchUser(username string) {
+func (sm *SessionManager) TouchUser(username string) error {
 	if username == "" {
-		return
+		return ErrorIncorrectUsername
 	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.lastSeen[username] = time.Now()
+	return nil
 }
 
 // RemoveUser removes user from active sessions (both lastSeen and tokens)
-func (sm *SessionManager) RemoveUser(username string) {
+func (sm *SessionManager) RemoveUser(username string) error {
 	if username == "" {
-		return
+		return ErrorIncorrectUsername
 	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -60,6 +65,7 @@ func (sm *SessionManager) RemoveUser(username string) {
 			break
 		}
 	}
+	return nil
 }
 
 // GetDeadUsers returns a list of usernames that haven't sent a signal within the timeout duration

@@ -20,14 +20,20 @@ func NewRoomManager() *RoomManager {
 		rooms: make(map[string]*Room),
 	}
 	// Domyślny pokój powitalny
-	rm.rooms["general"] = &Room{
-		Name:    "general",
+	rm.rooms[RoomNameGeneral] = &Room{
+		Name:    RoomNameGeneral,
 		Members: make(map[string]bool),
 	}
 	return rm
 }
 
-func (rm *RoomManager) JoinRoom(roomName, username string) {
+func (rm *RoomManager) JoinRoom(roomName, username string) error {
+	if username == "" {
+		return ErrorIncorrectRoomName
+	}
+	if username == "" {
+		return ErrorIncorrectUsername
+	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -41,19 +47,28 @@ func (rm *RoomManager) JoinRoom(roomName, username string) {
 	}
 
 	room.Members[username] = true
+	return nil
 }
 
-func (rm *RoomManager) LeaveRoom(roomName, username string) {
+func (rm *RoomManager) LeaveRoom(roomName, username string) error {
+	if username == "" {
+		return ErrorIncorrectRoomName
+	}
+	if username == "" {
+		return ErrorIncorrectUsername
+	}
+
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
 	if room, exists := rm.rooms[roomName]; exists {
 		delete(room.Members, username)
 		// Jeśli pokój robi się pusty i nie jest to "general", można go opcjonalnie usunąć:
-		if len(room.Members) == 0 && roomName != "general" {
+		if len(room.Members) == 0 && roomName != RoomNameGeneral {
 			delete(rm.rooms, roomName)
 		}
 	}
+	return nil
 }
 
 func (rm *RoomManager) GetRoomsInfo() []*chat.RoomInfo {

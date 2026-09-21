@@ -72,24 +72,32 @@ func (srv *ZmqServer) StartHeartbeatChecker(timeout time.Duration) {
 				log.Printf("[ZmqServer][Heartbeat] user '%s' exeeds timeout (%v). logging off...", user, timeout)
 
 				// 1. remove user from all rooms
-				srv.rooms.LeaveRoom("general", user)
+				err := srv.rooms.LeaveRoom(RoomNameGeneral, user)
+				if err != nil {
+					slog.Warn("[ZmqServer][handleLogoutRequest] could not leave room", "user", user, "room", RoomNameGeneral)
 
+					continue
+				}
 				// 2. remve user session
-				srv.sessions.RemoveUser(user)
+				err = srv.sessions.RemoveUser(user)
+				if err != nil {
+					slog.Warn("[ZmqServer][handleLogoutRequest] could not remove user", "user", user)
 
+					continue
+				}
 				// 3. broadcast user leave message to all other users via PUB
 				notifEnv := &chat.MessageEnvelope{
 					MessageId: fmt.Sprintf("notif-timeout-%d", time.Now().UnixNano()),
 					Payload: &chat.MessageEnvelope_SystemNotif{
 						SystemNotif: &chat.SystemNotification{
 							Type:      chat.NotificationType_NOTIF_USER_LEFT,
-							RoomName:  "general",
+							RoomName:  RoomNameGeneral,
 							Message:   fmt.Sprintf("user %s logged off (timeout).", user),
 							Timestamp: time.Now().UnixMilli(),
 						},
 					},
 				}
-				srv.pubSock.PublishTopicEnvelope("room:general", notifEnv)
+				srv.pubSock.PublishTopicEnvelope(TopicNameRoomGeneral, notifEnv)
 			}
 		}
 	}()
@@ -125,7 +133,7 @@ func (srv *ZmqServer) handleEnvelope(env *chat.MessageEnvelope) {
 	case *chat.MessageEnvelope_Heartbeat:
 		srv.sessions.TouchUser(payload.Heartbeat.Username)
 		// respond with simple ACK
-		srv.sendAckResponse(env.GetMessageId(), chat.Status_STATUS_OK, "pong")
+		srv.sendAckResponse(env.GetMessageId(), chat.Status_STATUS_OK, MessagePong)
 	case *chat.MessageEnvelope_LogoutReq: // <--- OBSŁUGA LOGOUT
 		srv.handleLogoutRequest(env.GetMessageId(), payload.LogoutReq)
 	default:
@@ -139,11 +147,33 @@ func (srv *ZmqServer) handleEnvelope(env *chat.MessageEnvelope) {
 
 func (srv *ZmqServer) handleLogin(msgID string, req *chat.LoginRequest) {
 	slog.Info("[ZmqServer][handleLogin]", "user", req.Username)
-	token := srv.sessions.CreateSession(req.GetUsername())
-
+	token, err := srv.sessions.CreateSession(req.GetUsername())
+	if err != nil {
+		srv.repSock.SendEnvelope(&chat.MessageEnvelope{
+			MessageId: msgID,
+			Payload: &chat.MessageEnvelope_LoginResp{
+				LoginResp: &chat.LoginResponse{
+					Status:       chat.Status_STATUS_ERROR,
+					ErrorMessage: err.Error(),
+				},
+			},
+		})
+		return
+	}
 	// Domyślnie dopisujemy usera do pokoju general
-	srv.rooms.JoinRoom("general", req.GetUsername())
-
+	err = srv.rooms.JoinRoom(RoomNameGeneral, req.GetUsername())
+	if err != nil {
+		srv.repSock.SendEnvelope(&chat.MessageEnvelope{
+			MessageId: msgID,
+			Payload: &chat.MessageEnvelope_LoginResp{
+				LoginResp: &chat.LoginResponse{
+					Status:       chat.Status_STATUS_ERROR,
+					ErrorMessage: err.Error(),
+				},
+			},
+		})
+		return
+	}
 	srv.repSock.SendEnvelope(&chat.MessageEnvelope{
 		MessageId: msgID,
 		Payload: &chat.MessageEnvelope_LoginResp{
@@ -157,10 +187,13 @@ func (srv *ZmqServer) handleLogin(msgID string, req *chat.LoginRequest) {
 
 func (srv *ZmqServer) handleJoinRoom(msgID string, req *chat.JoinRoomRequest) {
 	slog.Info("[ZmqServer][handleJoinRoom]", "user", req.Username)
-	srv.rooms.JoinRoom(req.GetRoomName(), req.GetUsername())
-
+	err := srv.rooms.JoinRoom(req.GetRoomName(), req.GetUsername())
+	if err != nil {
+		srv.sendAckResponse(msgID, chat.Status_STATUS_ERROR, fmt.Sprintf("can not join room #%s :: %s", req.GetRoomName(), err.Error()))
+		return
+	}
 	// Potwierdzenie dla dołączającego
-	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, fmt.Sprintf("Dołączono do pokoju #%s", req.GetRoomName()))
+	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, fmt.Sprintf("room #%s joined", req.GetRoomName()))
 
 	// Powiadomienie pozostałych członków na szynie PUB
 	notifEnv := &chat.MessageEnvelope{
@@ -169,19 +202,19 @@ func (srv *ZmqServer) handleJoinRoom(msgID string, req *chat.JoinRoomRequest) {
 			SystemNotif: &chat.SystemNotification{
 				Type:      chat.NotificationType_NOTIF_USER_JOINED,
 				RoomName:  req.GetRoomName(),
-				Message:   fmt.Sprintf("Użytkownik %s dołączył do pokoju!", req.GetUsername()),
+				Message:   fmt.Sprintf("user %s joined room %s!", req.GetUsername(), req.GetRoomName()),
 				Timestamp: time.Now().UnixMilli(),
 			},
 		},
 	}
-	srv.pubSock.PublishTopicEnvelope(fmt.Sprintf("room:%s", req.GetRoomName()), notifEnv)
+	srv.pubSock.PublishTopicEnvelope(fmt.Sprintf(TopicNameRoomTemplate, req.GetRoomName()), notifEnv)
 }
 
 func (srv *ZmqServer) handleLeaveRoom(msgID string, req *chat.LeaveRoomRequest) {
 	slog.Info("[ZmqServer][handleLeaveRoom]", "user", req.Username)
 	srv.rooms.LeaveRoom(req.GetRoomName(), req.GetUsername())
 
-	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, fmt.Sprintf("Opuszczono pokój #%s", req.GetRoomName()))
+	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, fmt.Sprintf("room #%s left", req.GetRoomName()))
 
 	notifEnv := &chat.MessageEnvelope{
 		MessageId: fmt.Sprintf("notif-%d", time.Now().UnixNano()),
@@ -189,12 +222,12 @@ func (srv *ZmqServer) handleLeaveRoom(msgID string, req *chat.LeaveRoomRequest) 
 			SystemNotif: &chat.SystemNotification{
 				Type:      chat.NotificationType_NOTIF_USER_LEFT,
 				RoomName:  req.GetRoomName(),
-				Message:   fmt.Sprintf("Użytkownik %s opuścił pokój.", req.GetUsername()),
+				Message:   fmt.Sprintf("user %s has left room %s", req.GetUsername(), req.GetRoomName()),
 				Timestamp: time.Now().UnixMilli(),
 			},
 		},
 	}
-	srv.pubSock.PublishTopicEnvelope(fmt.Sprintf("room:%s", req.GetRoomName()), notifEnv)
+	srv.pubSock.PublishTopicEnvelope(fmt.Sprintf(TopicNameRoomTemplate, req.GetRoomName()), notifEnv)
 }
 
 func (srv *ZmqServer) handleListRooms(msgID string, username string) {
@@ -214,7 +247,7 @@ func (srv *ZmqServer) handleListRooms(msgID string, username string) {
 
 func (srv *ZmqServer) handleRoomMessage(msgID string, req *chat.RoomMessage, rawEnv *chat.MessageEnvelope) {
 	slog.Info("[ZmqServer][handleRoomMessage]", "room", req.RoomName, "sender", req.SenderUsername, "message", req.Content)
-	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, "Wysłano")
+	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, "sent")
 	topic := fmt.Sprintf("room:%s", req.GetRoomName())
 	srv.pubSock.PublishTopicEnvelope(topic, rawEnv)
 }
@@ -222,7 +255,7 @@ func (srv *ZmqServer) handleRoomMessage(msgID string, req *chat.RoomMessage, raw
 func (srv *ZmqServer) handleDirectMessage(msgID string, req *chat.DirectMessage, rawEnv *chat.MessageEnvelope) {
 	fmt.Printf("[ZmqServer][DM] '%s' -> '%s': %s\n", req.GetSenderUsername(), req.GetRecipientUsername(), req.GetContent())
 
-	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, "Direct message delivered")
+	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, "direct message delivered")
 
 	topic := fmt.Sprintf("user:%s", req.GetRecipientUsername())
 	srv.pubSock.PublishTopicEnvelope(topic, rawEnv)
@@ -230,8 +263,15 @@ func (srv *ZmqServer) handleDirectMessage(msgID string, req *chat.DirectMessage,
 
 func (srv *ZmqServer) handleLogoutRequest(msgID string, req *chat.LogoutRequest) {
 	username := req.GetUsername()
+	if username == "" {
+		slog.Warn("[ZmqServer][handleLogoutRequest] incorrect username", "user", username)
+
+		srv.sendAckResponse(msgID, chat.Status_STATUS_ERROR, "Logout unsuccessful")
+		return
+
+	}
 	slog.Info("[ZmqServer][handleLogoutRequest]", "user", username)
-	srv.rooms.LeaveRoom("general", username)
+	srv.rooms.LeaveRoom(RoomNameGeneral, username)
 
 	srv.sessions.RemoveUser(username)
 
@@ -240,13 +280,13 @@ func (srv *ZmqServer) handleLogoutRequest(msgID string, req *chat.LogoutRequest)
 		Payload: &chat.MessageEnvelope_SystemNotif{
 			SystemNotif: &chat.SystemNotification{
 				Type:      chat.NotificationType_NOTIF_USER_LEFT,
-				RoomName:  "general",
-				Message:   fmt.Sprintf("Użytkownik %s wylogował się.", username),
+				RoomName:  RoomNameGeneral,
+				Message:   fmt.Sprintf("user %s logged out.", username),
 				Timestamp: time.Now().UnixMilli(),
 			},
 		},
 	}
-	srv.pubSock.PublishTopicEnvelope("room:general", notifEnv)
+	srv.pubSock.PublishTopicEnvelope(TopicNameRoomGeneral, notifEnv)
 	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, "Logout successful")
 }
 
