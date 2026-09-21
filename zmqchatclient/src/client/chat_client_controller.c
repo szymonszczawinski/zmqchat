@@ -490,20 +490,21 @@ static void clean_up(socket_sub_t*  socket_sub_shutdown,
 static int logout(socket_req_t* socket_req_chat, char* username, socket_push_t* socket_push_logs)
 {
     log_app(socket_push_logs, "[ZMQClient][controller thread] logout\n");
-    Api__Chat__LeaveRoomRequest leave_req = API__CHAT__LEAVE_ROOM_REQUEST__INIT;
-    leave_req.room_name                   = CHAT_ROOM_GENERAL;
-    leave_req.username                    = username;
+    Api__Chat__LogoutRequest logout_req = API__CHAT__LOGOUT_REQUEST__INIT;
+    logout_req.username                 = username;
 
-    Api__Chat__MessageEnvelope leave_req_env = API__CHAT__MESSAGE_ENVELOPE__INIT;
-    leave_req_env.message_id                 = "shutdown-leave";
-    leave_req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LEAVE_ROOM_REQ;
-    leave_req_env.leave_room_req             = &leave_req;
+    Api__Chat__MessageEnvelope logout_req_env = API__CHAT__MESSAGE_ENVELOPE__INIT;
+    logout_req_env.message_id                 = "cmd-logout";
+    logout_req_env.payload_case               = API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_LOGOUT_REQ;
+    logout_req_env.logout_req                 = &logout_req;
 
-    Api__Chat__MessageEnvelope* resp_leave = send_and_recv_env(socket_req_chat, &leave_req_env, socket_push_logs);
-    if (resp_leave)
+    // Wysyłamy żądanie wylogowania do serwera przez gniazdo REQ
+    Api__Chat__MessageEnvelope* res_env = send_and_recv_env(socket_req_chat, &logout_req_env, socket_push_logs);
+
+    if (res_env && res_env->payload_case == API__CHAT__MESSAGE_ENVELOPE__PAYLOAD_ACK)
     {
         log_app(socket_push_logs, "[ZMQClient][controller thread][logout] Server acknowledged leave general.\n");
-        api__chat__message_envelope__free_unpacked(resp_leave, NULL);
+        api__chat__message_envelope__free_unpacked(res_env, NULL);
         return OK_ZMQ;
     }
     else

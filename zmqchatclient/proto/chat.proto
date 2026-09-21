@@ -32,6 +32,9 @@ message LoginResponse {
   string error_message = 3;
 }
 
+message LogoutRequest {
+  string username = 1;
+}
 // --- HEARTBEAT ---
 message HeartbeatPing {
   string username = 1;
@@ -108,5 +111,6 @@ message MessageEnvelope {
     SystemNotification system_notif = 10;
     GenericAck ack = 11;
     HeartbeatPing heartbeat = 12;
+    LogoutRequest logout_req = 13;
   }
 }
