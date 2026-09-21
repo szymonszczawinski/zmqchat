@@ -66,16 +66,7 @@ func (srv *ZmqServer) StartHeartbeatChecker(timeout time.Duration) {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			now := time.Now()
-			var deadUsers []string
-
-			srv.sessions.mu.RLock()
-			for user, last := range srv.sessions.lastSeen {
-				if now.Sub(last) > timeout { // Np. 6 sekund bez sygnału
-					deadUsers = append(deadUsers, user)
-				}
-			}
-			srv.sessions.mu.RUnlock()
+			deadUsers := srv.sessions.GetDeadUsers(timeout)
 
 			for _, user := range deadUsers {
 				log.Printf("[ZmqServer][Heartbeat] user '%s' exeeds timeout (%v). logging off...", user, timeout)
@@ -84,9 +75,7 @@ func (srv *ZmqServer) StartHeartbeatChecker(timeout time.Duration) {
 				srv.rooms.LeaveRoom("general", user)
 
 				// 2. remve user session
-				srv.sessions.mu.Lock()
-				delete(srv.sessions.lastSeen, user)
-				srv.sessions.mu.Unlock()
+				srv.sessions.RemoveUser(user)
 
 				// 3. broadcast user leave message to all other users via PUB
 				notifEnv := &chat.MessageEnvelope{
@@ -137,6 +126,8 @@ func (srv *ZmqServer) handleEnvelope(env *chat.MessageEnvelope) {
 		srv.sessions.TouchUser(payload.Heartbeat.Username)
 		// respond with simple ACK
 		srv.sendAckResponse(env.GetMessageId(), chat.Status_STATUS_OK, "pong")
+	case *chat.MessageEnvelope_LogoutReq: // <--- OBSŁUGA LOGOUT
+		srv.handleLogoutRequest(env.GetMessageId(), payload.LogoutReq)
 	default:
 		srv.sendAckResponse(env.GetMessageId(), chat.Status_STATUS_ERROR, "unknown request type")
 	}
@@ -235,6 +226,28 @@ func (srv *ZmqServer) handleDirectMessage(msgID string, req *chat.DirectMessage,
 
 	topic := fmt.Sprintf("user:%s", req.GetRecipientUsername())
 	srv.pubSock.PublishTopicEnvelope(topic, rawEnv)
+}
+
+func (srv *ZmqServer) handleLogoutRequest(msgID string, req *chat.LogoutRequest) {
+	username := req.GetUsername()
+	slog.Info("[ZmqServer][handleLogoutRequest]", "user", username)
+	srv.rooms.LeaveRoom("general", username)
+
+	srv.sessions.RemoveUser(username)
+
+	notifEnv := &chat.MessageEnvelope{
+		MessageId: fmt.Sprintf("notif-logout-%d", time.Now().UnixNano()),
+		Payload: &chat.MessageEnvelope_SystemNotif{
+			SystemNotif: &chat.SystemNotification{
+				Type:      chat.NotificationType_NOTIF_USER_LEFT,
+				RoomName:  "general",
+				Message:   fmt.Sprintf("Użytkownik %s wylogował się.", username),
+				Timestamp: time.Now().UnixMilli(),
+			},
+		},
+	}
+	srv.pubSock.PublishTopicEnvelope("room:general", notifEnv)
+	srv.sendAckResponse(msgID, chat.Status_STATUS_OK, "Logout successful")
 }
 
 // --- HELPERS ---
