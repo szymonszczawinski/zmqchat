@@ -13,6 +13,8 @@
 #include <poll.h>
 
 #define OK_ZMQ                 0
+#define OK_ZMQ_QUIT            1001
+#define ERROR_ZMQ_GENERAL      -1
 #define ERROR_ZMQ_REQ_SEND     -1001
 #define ERROR_ZMQ_REQ_RECV     -1002
 #define ERROR_ZMQ_PAIR_UI_SEND -1003
@@ -180,9 +182,13 @@ void* routine_chat_controller(void* arg)
         // --- handle command from UI (ZMQ_PAIR) ---
         if (items[1].revents & ZMQ_POLLIN)
         {
-            if (handle_message_ui(
-                    socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, username, socket_push_logs)
-                < 0)
+            int result = handle_message_ui(
+                socket_req_chat, socket_pair_receiver_ctrl, socket_pair_ui_command, username, socket_push_logs);
+            if (result < 0)
+            {
+                break;
+            }
+            if (result == OK_ZMQ_QUIT)
             {
                 break;
             }
@@ -571,13 +577,14 @@ static int handle_message_ui(socket_req_t*  socket_req_chat,
     int  bytes = socket_pair_recv(socket_pair_ui_command, cmd_buf, sizeof(cmd_buf) - 1, 0);
     if (bytes <= 0)
     {
-        return -1;
+        return ERROR_ZMQ_GENERAL;
     }
     cmd_buf[bytes] = '\0';
 
     if (strcmp(cmd_buf, CHAT_COMMAND_QUIT) == 0)
     {
-        return -1;
+        log_app(socket_push_logs, "[ZMQClient][controller thread] receive 'quit' command\n");
+        return OK_ZMQ_QUIT;
     }
 
     if (strcmp(cmd_buf, CHAT_COMMAND_ROOMS) == 0)
