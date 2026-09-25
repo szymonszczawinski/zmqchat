@@ -1,6 +1,6 @@
 #include "chat_client_ui.h"
 #include "chat_client_common.h"
-#include "utils/chat_client_socket.h"
+#include "utils/zmq_sockets.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

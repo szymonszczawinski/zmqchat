@@ -4,7 +4,7 @@
 #include "chat_client_receiver.h"
 #include "chat_client_ui.h"
 #include "chat_client_common.h"
-#include "utils/chat_client_socket.h"
+#include "utils/zmq_sockets.h"
 #include "utils/signal_handler.h"
 #include <assert.h>
 #include <stdio.h>
